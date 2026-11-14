@@ -22,6 +22,13 @@ RUN pip install --no-deps "filelock>=4.0.9,<5"
 
 COPY . .
 
+# Non-root: this image (and the identical bind-mounted dev container) only
+# ever reads scanned-repo paths through :ro mounts and talks to db/redis/
+# php-analyzer over the network -- it never needs root. chown after COPY
+# since poetry installed packages into system site-packages as root above.
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

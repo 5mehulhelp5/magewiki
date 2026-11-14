@@ -9,7 +9,9 @@ app = "magewiki-api"
 primary_region = "fra"
 
 [build]
-  dockerfile = "Dockerfile"
+  # Dockerfile.fly (not the local dev Dockerfile) -- skips the dev
+  # dependency group and runs as non-root. See that file's own comment.
+  dockerfile = "Dockerfile.fly"
 
 [deploy]
   # Runs `alembic upgrade head` before each new version goes live -- the

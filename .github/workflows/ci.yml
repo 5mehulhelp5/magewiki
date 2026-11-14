@@ -105,6 +105,13 @@ jobs:
 
   sonar:
     needs: [backend, frontend]
+    # GitHub never exposes regular repo secrets (SONAR_TOKEN included) to a
+    # workflow run triggered by dependabot[bot] -- a deliberate security
+    # restriction, not a config bug -- so this job fails with "Not authorized"
+    # on every single Dependabot PR regardless of the dependency bump itself.
+    # Skipping it there isn't a quality trade-off: there's no code change for
+    # Sonar to say anything useful about on a version-bump-only diff anyway.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

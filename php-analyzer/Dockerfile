@@ -79,6 +79,18 @@ COPY php-analyzer/noop-autoload.php ./noop-autoload.php
 # sidecar too with no new shared k8s volume.
 COPY backend/tests/fixtures/demo-store /app/tests/fixtures/demo-store
 
+# Non-root, on top of the existing network isolation (php_analyzer_net is
+# internal-only) and tini -- this is the one sidecar that actually executes
+# a scanned module's own third-party code (run_phpunit), so least-privilege
+# at the container-user level is a third, independent layer of the same
+# defense those two already exist for. /tmp (where every tool here writes
+# its scratch files -- see index.php's tempnam()/sys_get_temp_dir() calls)
+# is already world-writable (1777) in the base image, so no extra chown
+# needed there; /opt/analyzer just needs read+execute, which composer
+# install's default umask already leaves world-readable.
+RUN addgroup -S appgroup && adduser -S -G appgroup appuser
+USER appuser
+
 EXPOSE 8080
 
 # tini as PID 1: run_phpunit() (index.php) spawns real subprocesses under a
