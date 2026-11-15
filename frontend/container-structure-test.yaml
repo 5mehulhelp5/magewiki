@@ -1,0 +1,21 @@
+schemaVersion: "2.0.0"
+metadataTest:
+  user: "node"
+  exposedPorts: ["3000"]
+  workdir: "/app"
+  cmd: ["npm", "run", "dev"]
+commandTests:
+  - name: "node version"
+    command: "node"
+    args: ["--version"]
+    expectedOutput: ["v26\\..*"]
+  - name: "runs as non-root"
+    command: "whoami"
+    expectedOutput: ["node"]
+fileExistenceTests:
+  - name: "package.json"
+    path: "/app/package.json"
+    shouldExist: true
+  - name: "next config"
+    path: "/app/next.config.ts"
+    shouldExist: true

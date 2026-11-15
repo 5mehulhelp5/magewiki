@@ -19,6 +19,11 @@ FROM alpine:edge
 # "Class IntlDateFormatter not found" error without it. pcov: a lightweight
 # coverage driver (no Xdebug overhead) PHPUnit auto-detects and uses for
 # --coverage-clover once loaded.
+# alpine:edge is a rolling base with no single fixed package-version set to
+# pin against (today's pin would be stale/unresolvable tomorrow) -- see the
+# FROM alpine:edge comment above for why edge, not a numbered release, is
+# required here in the first place.
+# hadolint ignore=DL3018
 RUN apk add --no-cache git unzip tini \
     php83 php83-phar php83-mbstring php83-tokenizer php83-ctype php83-dom \
         php83-xml php83-xmlwriter php83-simplexml php83-curl php83-openssl php83-iconv \

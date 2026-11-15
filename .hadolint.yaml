@@ -1,0 +1,7 @@
+# Only warning/error/fatal findings fail CI. Info-level findings (DL3059
+# "consolidate RUN", DL3066 "use a numeric UID") are real but not worth
+# blocking on here — they'd fire on nearly every `USER appuser`/`USER node`
+# line and every Dockerfile's multi-stage RUN layout across all 5 Dockerfiles,
+# and fixing them (e.g. switching USER to a numeric UID) has no benefit for a
+# single-user dev tool. They still show up in CI output, just don't fail it.
+failure-threshold: warning

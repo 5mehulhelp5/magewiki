@@ -653,6 +653,38 @@ an exemption from this file's test-data rule.
 
 ## Phase plan — decisions and incidents
 
+**Phase 7b: Dockerfile lint + image structure tests (recorded 2026-11-15):** `docker-build`
+only built the 3 CI images and `image-scan` only ran Trivy (CVE in the OS layer) — nothing
+linted the Dockerfiles themselves or asserted that a built image actually has the shape it's
+supposed to (right user, right exposed port, right binaries present and runnable). Two new
+jobs close that gap: `dockerfile-lint` (Hadolint, matrix over all 5 Dockerfiles including the
+two `Dockerfile.fly` prod variants that nothing else in CI touches at all — pure static lint
+of the Dockerfile text, no image build needed, so including the Fly variants is nearly free)
+and `image-structure-test` (Google's `container-structure-test`, scoped to only the 3 images
+`docker-build`/`image-scan` already build — `Dockerfile.fly` needs extra build ARGs and isn't
+part of that existing matrix, so extending CST to it would've meant a second, divergent build
+path for no real benefit yet). `image-structure-test` rebuilds each image itself (same
+`cache-from: type=gha` pattern as `image-scan`) rather than trying to reuse `docker-build`'s
+already-loaded image, because a loaded image never survives past the runner/job it was built
+on — only the GHA layer cache does.
+
+Both jobs are blocking (no `continue-on-error`), unlike Trivy/pip-audit: they assert the
+project's own deterministic, self-chosen facts (a Dockerfile instruction, a file that should
+exist in the image), not a third party's CVE database, so there's no inherent false-positive
+noise to protect against. Hadolint's `failure-threshold` is set to `warning` in a new root
+`.hadolint.yaml` — confirmed by actually running `hadolint` against all 5 Dockerfiles first:
+every file fired `DL3066` ("non-numeric user-id", i.e. `USER appuser`/`USER node` by name
+rather than UID) and the two backend Dockerfiles also fired `DL3059` ("consolidate RUN"), both
+only `info` severity and not worth fixing (switching `USER` to a bare numeric UID has no
+benefit for a single-user dev tool). `php-analyzer/Dockerfile`'s `apk add --no-cache <pkgs>`
+with no pinned versions fired `DL3018` (`warning` severity) — genuinely deliberate (see that
+file's own `FROM alpine:edge` comment: a rolling base with three co-installed PHP versions has
+no single version set to pin against), so it gets a local `# hadolint ignore=DL3018` right
+above that one `RUN`, not a blanket config-level ignore. All three CST config files
+(`backend/`, `frontend/`, `php-analyzer/container-structure-test.yaml`) were verified against
+real locally-built images (`container-structure-test` v1.22.1, darwin-arm64 binary), not just
+written from reading the Dockerfiles — all pass.
+
 **Phase 9 decision (recorded 2026-11-06):** a single generic `module_quality_findings` table
 (`check_type`, `severity`, `file_path`, `line`, `message`) backs every parser-only quality check,
 rather than one table per check. v1 hit exactly this gap — it shipped per-scanner columns first

@@ -1,0 +1,33 @@
+schemaVersion: "2.0.0"
+metadataTest:
+  user: "appuser"
+  exposedPorts: ["8080"]
+  workdir: "/opt/analyzer"
+  entrypoint: ["tini", "--"]
+  cmd: ["php", "-S", "0.0.0.0:8080", "-t", "public"]
+commandTests:
+  - name: "php83 available"
+    command: "php83"
+    args: ["--version"]
+  - name: "php84 available"
+    command: "php84"
+    args: ["--version"]
+  - name: "php85 available"
+    command: "php85"
+    args: ["--version"]
+  - name: "composer installed"
+    command: "composer"
+    args: ["--version"]
+  - name: "runs as non-root"
+    command: "whoami"
+    expectedOutput: ["appuser"]
+fileExistenceTests:
+  - name: "public entrypoint dir"
+    path: "/opt/analyzer/public"
+    shouldExist: true
+  - name: "phpstan config"
+    path: "/opt/analyzer/phpstan.neon"
+    shouldExist: true
+  - name: "demo-store fixture baked in"
+    path: "/app/tests/fixtures/demo-store"
+    shouldExist: true
