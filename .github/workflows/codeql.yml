@@ -18,6 +18,12 @@ on:
   schedule:
     - cron: "0 4 * * 1" # weekly, matching the previous default-setup cadence
 
+# CodeQL never deploys anything, so a superseded run can always be cancelled
+# outright -- unlike ci.yml's own concurrency group, which only cancels on PR runs.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     runs-on: ubuntu-latest

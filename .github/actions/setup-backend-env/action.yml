@@ -11,6 +11,8 @@ runs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.13"
+        cache: poetry
+        cache-dependency-path: ${{ inputs.working-directory }}/poetry.lock
     - run: pip install "poetry==1.8.3"
       shell: bash
     - run: poetry install --no-root
