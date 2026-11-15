@@ -685,6 +685,34 @@ above that one `RUN`, not a blanket config-level ignore. All three CST config fi
 real locally-built images (`container-structure-test` v1.22.1, darwin-arm64 binary), not just
 written from reading the Dockerfiles — all pass.
 
+**CI speed-up: concurrency cancellation + dependency caching (recorded 2026-11-15):** a
+general CI-optimization pass, prompted by a user request to look for anything worth
+speeding up or adding, found two real, no-tradeoff gaps: `ci.yml`/`codeql.yml` had no
+`concurrency` group at all, so a superseded run (e.g. a quick second push to the same PR)
+kept running to completion instead of being cancelled; and neither `actions/setup-node`
+(frontend, e2e-smoke) nor `setup-backend-env`'s `actions/setup-python` passed a `cache`
+input, so every single run did a fully cold `npm install`/`poetry install` with nothing
+restored from a prior run. Both fixed directly (no tradeoff to weigh): `ci.yml`'s
+concurrency group only cancels on `pull_request` runs, deliberately not on `main` pushes,
+so a superseded PR run gets killed but an in-flight `deploy` job on `main` never does;
+`codeql.yml` has no deploy job at all, so its group cancels unconditionally.
+
+Two further findings from the same pass were surfaced to the user rather than acted on,
+since each involves a real tradeoff or a deliberate prior choice: (1) `main`'s branch
+protection `required_status_checks.contexts` is an empty list — the rule exists (added in
+the v1.7.0 release specifically to unblock Dependabot's `enablePullRequestAutoMerge`) but
+currently requires zero specific checks to pass before a PR can merge, which may be
+intentional (that same release's notes say the rule was kept minimal, "not enforced for
+admins, so direct pushes to `main` still work exactly as before") or may be an oversight —
+the user's call, not assumed either way. (2) `docker-build`, `image-scan`,
+`image-structure-test`, and `e2e-smoke` each independently rebuild the same 3 images from
+`cache-from: type=gha` rather than sharing one built image across jobs (impossible directly
+— a `load: true`-loaded image never survives past the runner/job that built it, only the
+GHA layer cache does); switching to a `docker save` artifact handed between jobs would avoid
+the redundant rebuild-from-cache step, at the cost of artifact upload/download bandwidth for
+multi-hundred-MB image tars, which for already-cached layers may be a wash or worse — not
+implemented without the user weighing in on that trade.
+
 **Phase 9 decision (recorded 2026-11-06):** a single generic `module_quality_findings` table
 (`check_type`, `severity`, `file_path`, `line`, `message`) backs every parser-only quality check,
 rather than one table per check. v1 hit exactly this gap — it shipped per-scanner columns first
