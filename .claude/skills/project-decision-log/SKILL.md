@@ -697,14 +697,17 @@ concurrency group only cancels on `pull_request` runs, deliberately not on `main
 so a superseded PR run gets killed but an in-flight `deploy` job on `main` never does;
 `codeql.yml` has no deploy job at all, so its group cancels unconditionally.
 
-Two further findings from the same pass were surfaced to the user rather than acted on,
-since each involves a real tradeoff or a deliberate prior choice: (1) `main`'s branch
-protection `required_status_checks.contexts` is an empty list — the rule exists (added in
-the v1.7.0 release specifically to unblock Dependabot's `enablePullRequestAutoMerge`) but
-currently requires zero specific checks to pass before a PR can merge, which may be
-intentional (that same release's notes say the rule was kept minimal, "not enforced for
-admins, so direct pushes to `main` still work exactly as before") or may be an oversight —
-the user's call, not assumed either way. (2) `docker-build`, `image-scan`,
+Two further findings from the same pass were surfaced to the user rather than acted on
+immediately, since each involves a real tradeoff or a deliberate prior choice: (1) `main`'s
+branch protection `required_status_checks.contexts` was an empty list — the rule existed
+(added in the v1.7.0 release specifically to unblock Dependabot's
+`enablePullRequestAutoMerge`) but required zero specific checks to pass before a PR could
+merge. **Resolved same session, user confirmed:** `required_status_checks.contexts` now
+lists `backend`, `frontend`, `docker-build`, `e2e-smoke` — the jobs that actually prove the
+app builds/lints/tests green, matching `deploy`'s own existing `needs:` gate — set via the
+API (`gh api -X PATCH .../protection/required_status_checks`), not a code change, so no
+commit exists for it. `enforce_admins` deliberately stays `false`: direct pushes to `main`
+still bypass this exactly as before, unchanged from the v1.7.0 decision. (2) `docker-build`, `image-scan`,
 `image-structure-test`, and `e2e-smoke` each independently rebuild the same 3 images from
 `cache-from: type=gha` rather than sharing one built image across jobs (impossible directly
 — a `load: true`-loaded image never survives past the runner/job that built it, only the
