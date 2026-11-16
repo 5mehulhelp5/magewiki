@@ -2,7 +2,7 @@ import json
 import shutil
 from pathlib import Path
 
-from app.scanner.discovery import find_modules, walk_module_source_files
+from app.scanner.discovery import find_modules, read_module_source_files, walk_module_source_files
 
 
 def test_find_modules_in_store_root(demo_store_path: Path):
@@ -160,3 +160,23 @@ def test_a_composer_path_repository_glob_match_is_skipped_if_resolve_raises_oser
     monkeypatch.setattr(Path, "resolve", _raise_for_the_match)
 
     assert find_modules(repo_root) == []
+
+
+def test_read_module_source_files_returns_every_files_bytes_keyed_by_relative_path(demo_module_path: Path):
+    sources = read_module_source_files(demo_module_path)
+
+    assert set(sources) == {str(f.relative_to(demo_module_path)) for f in walk_module_source_files(demo_module_path)}
+    plugin_path = next(rp for rp in sources if rp.endswith("SampleCheckoutPlugin.php"))
+    assert sources[plugin_path] == (demo_module_path / plugin_path).read_bytes()
+
+
+def test_read_module_source_files_skips_a_file_that_vanishes_before_it_can_be_read(tmp_path: Path, monkeypatch):
+    good = tmp_path / "Good.php"
+    good.write_text("<?php\nclass Good {}\n")
+    vanished = tmp_path / "Vanished.php"
+
+    monkeypatch.setattr("app.scanner.discovery.walk_module_source_files", lambda root: [good, vanished])
+
+    sources = read_module_source_files(tmp_path)
+
+    assert set(sources) == {"Good.php"}

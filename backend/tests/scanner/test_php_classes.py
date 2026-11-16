@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from app.scanner.php_classes import _string_literal_value, catalog_module_classes, parse_php_file
+from app.scanner.php_classes import (
+    _string_literal_value,
+    catalog_module_classes,
+    entry_from_dict,
+    entry_to_dict,
+    parse_php_file,
+    parse_php_source,
+)
 from app.scanner.php_parser import find_all, parse_php
 
 
@@ -133,3 +140,74 @@ def test_parse_php_file_captures_abstract_modifier(tmp_path: Path):
 
     assert entries["Foo"].is_abstract is True
     assert entries["Bar"].is_abstract is False
+
+
+def test_parse_php_file_delegates_to_parse_php_source_with_the_files_bytes(tmp_path: Path):
+    path = tmp_path / "Foo.php"
+    path.write_text("<?php\nclass Foo {}\n")
+
+    via_file = parse_php_file(path, "Foo.php")
+    via_source = parse_php_source(path.read_bytes(), "Foo.php")
+
+    assert via_file == via_source
+
+
+def test_catalog_module_classes_parses_from_in_memory_sources_without_touching_disk(tmp_path: Path, monkeypatch):
+    """Orchestrator.py reads every file's bytes once (read_module_source_files)
+    and passes them here instead of letting this function re-read from disk --
+    the whole point of the `sources` parameter. Confirm it never calls
+    walk_module_source_files (the disk-walking entry point) when sources are
+    given."""
+
+    def _must_not_walk(root):
+        raise AssertionError("must not walk the filesystem when sources is given")
+
+    monkeypatch.setattr("app.scanner.php_classes.walk_module_source_files", _must_not_walk)
+
+    sources = {
+        "Foo.php": b"<?php\nclass Foo {}\n",
+        "Bar.php": b"<?php\nclass Bar extends Foo {}\n",
+    }
+    classes = catalog_module_classes(tmp_path, sources)
+
+    by_name = {c.class_name: c for c in classes}
+    assert by_name["Foo"].file_path == "Foo.php"
+    assert by_name["Bar"].file_path == "Bar.php"
+    assert by_name["Bar"].extends == ["Foo"]
+
+
+def test_catalog_module_classes_with_sources_tolerates_garbage_bytes_in_one_file(tmp_path: Path):
+    """tree-sitter is error-tolerant by design (ERROR nodes, never an
+    exception) and node_text() decodes with errors="replace" -- so malformed
+    content doesn't actually raise SyntaxError/UnicodeDecodeError in
+    practice. This just confirms it degrades to "no classes found" for that
+    one file rather than ever crashing the whole batch."""
+    sources = {"Good.php": b"<?php\nclass Good {}\n", "Broken.php": b"\xff\xfe not valid php or utf-8"}
+
+    classes = catalog_module_classes(tmp_path, sources)
+
+    assert {c.class_name for c in classes} == {"Good"}
+
+
+def test_catalog_module_classes_with_an_empty_sources_dict_parses_nothing(tmp_path: Path, monkeypatch):
+    def _must_not_walk(root):
+        raise AssertionError("must not walk the filesystem when sources (even empty) is given")
+
+    monkeypatch.setattr("app.scanner.php_classes.walk_module_source_files", _must_not_walk)
+
+    assert catalog_module_classes(tmp_path, {}) == []
+
+
+def test_entry_to_dict_and_back_round_trips_a_parsed_class(tmp_path: Path):
+    path = tmp_path / "Foo.php"
+    path.write_text(
+        "<?php\nabstract class Foo extends Base implements Iface {\n"
+        "    const ADMIN_RESOURCE = 'Vendor_Module::foo';\n"
+        "    public function bar() {}\n"
+        "}\n"
+    )
+    (entry,) = parse_php_file(path, "Foo.php")
+
+    round_tripped = entry_from_dict(entry_to_dict(entry))
+
+    assert round_tripped == entry

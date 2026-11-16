@@ -43,7 +43,16 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def compute_module_file_hashes(module_root: Path) -> dict[str, str]:
+def compute_module_file_hashes(module_root: Path, php_sources: dict[str, bytes] | None = None) -> dict[str, str]:
+    """Hashes every fixed structural-fact file plus every .php/.phtml source file.
+
+    `php_sources` lets a caller that already read every source file's bytes once
+    (orchestrator.py's read_module_source_files(), shared with catalog_module_
+    classes' tree-sitter parse) hash from that same in-memory content instead of
+    reading each file from disk again here — otherwise every PHP/phtml file in a
+    module got read from disk twice per scan. Omitting it (every existing direct
+    caller/test) falls back to reading the files here, unchanged.
+    """
     hashes: dict[str, str] = {}
 
     for relative in _FIXED_FILES:
@@ -51,9 +60,13 @@ def compute_module_file_hashes(module_root: Path) -> dict[str, str]:
         if path.is_file():
             hashes[relative] = _sha256_file(path)
 
-    for php_file in walk_module_source_files(module_root):
-        relative_path = str(php_file.relative_to(module_root))
-        hashes[relative_path] = _sha256_file(php_file)
+    if php_sources is not None:
+        for relative_path, content in php_sources.items():
+            hashes[relative_path] = hashlib.sha256(content).hexdigest()
+    else:
+        for php_file in walk_module_source_files(module_root):
+            relative_path = str(php_file.relative_to(module_root))
+            hashes[relative_path] = _sha256_file(php_file)
 
     return hashes
 

@@ -36,10 +36,10 @@ async def test_a_failing_module_is_visible_in_scan_level_warnings_and_does_not_b
 
     real_compute_hashes = orchestrator_module.compute_module_file_hashes
 
-    def _raise_for_bad_module(root: Path):
+    def _raise_for_bad_module(root: Path, php_sources=None):
         if root == bad_module:
             raise RuntimeError("forced failure for test")
-        return real_compute_hashes(root)
+        return real_compute_hashes(root, php_sources)
 
     monkeypatch.setattr(orchestrator_module, "compute_module_file_hashes", _raise_for_bad_module)
 

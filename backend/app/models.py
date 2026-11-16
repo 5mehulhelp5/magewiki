@@ -205,6 +205,30 @@ class PhpClassMethod(Base):
     php_class: Mapped[PhpClass] = relationship(back_populates="methods")
 
 
+class PhpParseCache(Base):
+    """Caches catalog_module_classes' tree-sitter parse of one PHP/phtml file's
+    bytes, keyed by that file's own content_hash (the same hash
+    compute_module_file_hashes already computes for it). `entries` is the full,
+    role-agnostic parse result — every class/interface/trait the file declares,
+    and ALL of their methods, not just the ones that happen to be plugins/
+    observers right now — so a cache hit never needs tree-sitter to reparse a
+    file whose content is byte-identical to one already parsed, anywhere, ever.
+
+    Deliberately does NOT cache is_plugin/is_observer/role_signals — those
+    depend on the *global* plugin/observer class sets built from every
+    module's di.xml/events.xml in orchestrator.py's Phase A, which can change
+    even when this one file's own content doesn't. Role flagging is always
+    recomputed fresh from these cached entries plus the current scan's global
+    sets, exactly as if the file had just been reparsed.
+    """
+
+    __tablename__ = "php_parse_cache"
+
+    content_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    entries: Mapped[list] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class DiPreference(Base):
     __tablename__ = "di_preferences"
 

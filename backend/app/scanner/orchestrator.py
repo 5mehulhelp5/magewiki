@@ -2,7 +2,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -57,7 +57,7 @@ from app.scanner.db_schema_conflicts import DbColumnRow, detect_db_schema_confli
 from app.scanner.db_schema_xml import parse_db_schema_xml
 from app.scanner.deprecated_scanner import scan_deprecated_annotations
 from app.scanner.di_xml import parse_di_xml
-from app.scanner.discovery import find_modules
+from app.scanner.discovery import find_modules, read_module_source_files
 from app.scanner.dto import (
     AclResourceEntry,
     CacheTypeEntry,
@@ -75,6 +75,7 @@ from app.scanner.dto import (
     ModuleXmlResult,
     MviewEntry,
     PendingAnalysisJob,
+    PhpClassEntry,
     QueueBindingEntry,
     RouteEntry,
     WebapiRouteEntry,
@@ -98,6 +99,7 @@ from app.scanner.mview_conflicts import MviewRow, detect_mview_conflicts
 from app.scanner.mview_xml import parse_mview_xml
 from app.scanner.php_analyzer_client import check_php_static_analysis, check_php_unit_tests
 from app.scanner.php_classes import catalog_module_classes
+from app.scanner.php_parse_cache import lookup_cached_entries, store_parsed_entries
 from app.scanner.plugin_conflicts import PluginRow, detect_plugin_conflicts
 from app.scanner.preference_conflicts import PreferenceRow, detect_preference_conflicts
 from app.scanner.queue_config import parse_queue_config
@@ -1021,12 +1023,16 @@ async def _persist_module(
         old_hashes = {}
         old_analyzed = {}
 
-    # Reads and SHA256-hashes every file in the module — genuinely blocking disk
-    # I/O and CPU work. Calling it directly here would block the whole event loop
-    # for the duration, stalling every other concurrent coroutine (other modules'
-    # DB work, SSE progress streaming) for as long as this one module's files take
-    # to hash, defeating the per-module-commit live-progress design.
-    new_hashes = await asyncio.to_thread(compute_module_file_hashes, pm.discovered.root)
+    # Reads every .php/.phtml file's bytes once (shared below with
+    # catalog_module_classes' tree-sitter parse, instead of each independently
+    # reading every file from disk) and SHA256-hashes every file in the module
+    # — genuinely blocking disk I/O and CPU work. Calling it directly here
+    # would block the whole event loop for the duration, stalling every other
+    # concurrent coroutine (other modules' DB work, SSE progress streaming)
+    # for as long as this one module's files take to read and hash, defeating
+    # the per-module-commit live-progress design.
+    php_sources = await asyncio.to_thread(read_module_source_files, pm.discovered.root)
+    new_hashes = await asyncio.to_thread(compute_module_file_hashes, pm.discovered.root, php_sources)
     diff = diff_file_hashes(old_hashes, new_hashes)
     new_current_hash = aggregate_hash(new_hashes)
 
@@ -1183,7 +1189,39 @@ async def _persist_module(
     await _sync_module_children(session, module.id, ModuleMenuItem, pm.menu_items)
     await _sync_module_children(session, module.id, ModuleCacheType, pm.cache_types)
 
-    classes = catalog_module_classes(pm.discovered.root)
+    # Reusing php_sources/new_hashes from above: a file whose content_hash
+    # already has a cached tree-sitter parse (php_parse_cache, keyed by
+    # content_hash alone -- anywhere, any module, any scan) never needs to be
+    # reparsed, closing the other half of the double-work this module's files
+    # used to pay every scan even when nothing in them had changed. A cache
+    # hit's entries always get their file_path rewritten to *this* file's own
+    # relative path -- the cached blob's file_path reflects whichever file
+    # first produced that content_hash, which could be a different file with
+    # byte-identical content.
+    php_hashes_by_path = {rp: new_hashes[rp] for rp in php_sources}
+    cached_entries_by_hash = await lookup_cached_entries(session, set(php_hashes_by_path.values()))
+
+    classes: list[PhpClassEntry] = []
+    miss_sources: dict[str, bytes] = {}
+    for relative_path, content_hash in php_hashes_by_path.items():
+        cached = cached_entries_by_hash.get(content_hash)
+        if cached is not None:
+            classes.extend(replace(entry, file_path=relative_path) for entry in cached)
+        else:
+            miss_sources[relative_path] = php_sources[relative_path]
+
+    freshly_parsed = catalog_module_classes(pm.discovered.root, miss_sources)
+    classes.extend(freshly_parsed)
+
+    if miss_sources:
+        freshly_parsed_by_path: dict[str, list[PhpClassEntry]] = {rp: [] for rp in miss_sources}
+        for entry in freshly_parsed:
+            freshly_parsed_by_path[entry.file_path].append(entry)
+        await store_parsed_entries(
+            session,
+            {php_hashes_by_path[rp]: entries for rp, entries in freshly_parsed_by_path.items()},
+        )
+
     outcome.classes = len(classes)
     # phpmetrics (check_php_static_analysis below) reports class FQCNs, not
     # file paths like every other PHP-toolchain tool — resolved against this

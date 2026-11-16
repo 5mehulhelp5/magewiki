@@ -113,3 +113,21 @@ def walk_module_source_files(module_root: Path) -> list[Path]:
             if filename.endswith(_SOURCE_FILE_SUFFIXES):
                 source_files.append(Path(dirpath) / filename)
     return source_files
+
+
+def read_module_source_files(module_root: Path) -> dict[str, bytes]:
+    """Reads every .php/.phtml file's bytes exactly once, keyed by relative
+    path -- shared by hashing.py's compute_module_file_hashes and
+    php_classes.py's catalog_module_classes so each file is read from disk
+    once per scan, not twice (hashing and tree-sitter parsing previously each
+    read it independently). A file that disappears between walk_module_
+    source_files() listing it and this read (a real OS-level race, however
+    unlikely) is skipped rather than raising and aborting the whole module.
+    """
+    sources: dict[str, bytes] = {}
+    for path in walk_module_source_files(module_root):
+        try:
+            sources[str(path.relative_to(module_root))] = path.read_bytes()
+        except OSError:
+            continue
+    return sources

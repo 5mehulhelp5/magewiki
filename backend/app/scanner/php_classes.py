@@ -1,4 +1,6 @@
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
@@ -109,8 +111,7 @@ def _extract_methods(class_body: Node, source: bytes) -> list[PhpMethodEntry]:
     return methods
 
 
-def parse_php_file(path: Path, relative_file_path: str) -> list[PhpClassEntry]:
-    source = path.read_bytes()
+def parse_php_source(source: bytes, relative_file_path: str) -> list[PhpClassEntry]:
     tree = parse_php(source)
 
     entries: list[PhpClassEntry] = []
@@ -157,8 +158,32 @@ def parse_php_file(path: Path, relative_file_path: str) -> list[PhpClassEntry]:
     return entries
 
 
-def catalog_module_classes(module_root: Path) -> list[PhpClassEntry]:
+def parse_php_file(path: Path, relative_file_path: str) -> list[PhpClassEntry]:
+    return parse_php_source(path.read_bytes(), relative_file_path)
+
+
+def catalog_module_classes(module_root: Path, sources: dict[str, bytes] | None = None) -> list[PhpClassEntry]:
+    """Parses every .php/.phtml file into its PhpClassEntry list.
+
+    `sources` lets a caller that already read every file's bytes once
+    (orchestrator.py's read_module_source_files(), shared with hashing.py's
+    compute_module_file_hashes) parse from that same in-memory content
+    instead of reading each file from disk again here. Omitting it (every
+    existing direct caller/test) falls back to reading the files here,
+    unchanged.
+    """
     entries: list[PhpClassEntry] = []
+    if sources is not None:
+        # No try/except here, unlike the disk-reading branch below: tree-sitter
+        # is error-tolerant by construction (malformed syntax becomes an ERROR
+        # node, never an exception) and node_text() decodes with
+        # errors="replace", so parse_php_source() has nothing to catch for
+        # already-in-memory content -- verified empirically against garbage
+        # bytes (see tests/scanner/test_php_classes.py).
+        for relative_file_path, content in sources.items():
+            entries.extend(parse_php_source(content, relative_file_path))
+        return entries
+
     for php_file in walk_module_source_files(module_root):
         relative_file_path = str(php_file.relative_to(module_root))
         try:
@@ -166,3 +191,29 @@ def catalog_module_classes(module_root: Path) -> list[PhpClassEntry]:
         except (SyntaxError, UnicodeDecodeError, OSError):
             continue
     return entries
+
+
+def entry_to_dict(entry: PhpClassEntry) -> dict[str, Any]:
+    """JSON-serializable form of one parsed class, for php_parse_cache.py's
+    content-hash-keyed cache. Plain asdict() -- PhpClassEntry/PhpMethodEntry
+    are both simple dataclasses, no custom types to handle."""
+    return asdict(entry)
+
+
+def entry_from_dict(data: dict[str, Any]) -> PhpClassEntry:
+    """Inverse of entry_to_dict() -- reconstructs a PhpClassEntry (with its
+    nested PhpMethodEntry list) from a cached row's JSON."""
+    return PhpClassEntry(
+        fqcn=data["fqcn"],
+        namespace=data["namespace"],
+        class_name=data["class_name"],
+        kind=data["kind"],
+        extends=data["extends"],
+        implements=data["implements"],
+        file_path=data["file_path"],
+        start_line=data["start_line"],
+        end_line=data["end_line"],
+        methods=[PhpMethodEntry(**m) for m in data["methods"]],
+        is_abstract=data["is_abstract"],
+        consts=data["consts"],
+    )

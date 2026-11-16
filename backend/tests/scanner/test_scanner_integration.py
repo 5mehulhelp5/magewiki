@@ -123,6 +123,72 @@ async def test_scan_repository_detects_a_single_changed_file(demo_store_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_scan_repository_never_reparses_a_php_file_whose_content_was_already_cached(
+    demo_store_path: Path, db_session, tmp_path: Path, monkeypatch
+):
+    """Regression test for the php_parse_cache (content-hash-keyed, shared
+    across modules/scans): a no-op rescan's PHP files all hit the cache from
+    the first scan, so tree-sitter must never run again for any of them.
+    """
+    repo_copy = tmp_path / "demo-store"
+    shutil.copytree(demo_store_path, repo_copy)
+    repo_root = str(repo_copy.resolve())
+    await delete_module_if_present(db_session, repo_root, "Vendor_Module")
+
+    await scan_repository(repo_root, db_session)
+
+    import app.scanner.php_classes as php_classes_module
+
+    parse_calls = 0
+    real_parse_php = php_classes_module.parse_php
+
+    def _counting_parse_php(source):
+        nonlocal parse_calls
+        parse_calls += 1
+        return real_parse_php(source)
+
+    monkeypatch.setattr(php_classes_module, "parse_php", _counting_parse_php)
+
+    await scan_repository(repo_root, db_session)
+
+    assert parse_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_scan_repository_reuses_a_cached_parse_across_modules_with_identical_php_content(
+    tmp_path: Path, db_session
+):
+    """Correctness regression test: php_parse_cache is keyed by content_hash
+    alone, shared across every module -- a cache hit's entries must still get
+    *this* file's own file_path, not whichever file first produced that
+    content_hash, or a second module with byte-identical content would show
+    up with its classes misattributed to the first module's file path.
+    """
+    repo_root = tmp_path / "repo"
+    identical_php = "<?php\nnamespace Vendor\\Shared;\nclass SharedThing {\n    public function doIt() {}\n}\n"
+
+    for name in ("A", "B"):
+        module_dir = repo_root / "app" / "code" / "Vendor" / name
+        (module_dir / "etc").mkdir(parents=True)
+        (module_dir / "etc" / "module.xml").write_text(
+            f'<?xml version="1.0"?><config><module name="Vendor_{name}"/></config>', encoding="utf-8"
+        )
+        (module_dir / "SharedThing.php").write_text(identical_php, encoding="utf-8")
+
+    result = await scan_repository(str(repo_root), db_session)
+    assert result.modules_found == 2
+
+    for name in ("A", "B"):
+        module = await db_session.scalar(
+            select(Module).where(Module.repo_root == str(repo_root), Module.name == f"Vendor_{name}")
+        )
+        classes = (await db_session.scalars(select(PhpClass).where(PhpClass.module_id == module.id))).all()
+        assert len(classes) == 1
+        assert classes[0].class_name == "SharedThing"
+        assert classes[0].file_path == "SharedThing.php"  # not the other module's path
+
+
+@pytest.mark.asyncio
 async def test_scan_repository_preserves_unanalyzed_status_on_a_no_op_rescan(
     demo_store_path: Path, db_session, tmp_path: Path
 ):
