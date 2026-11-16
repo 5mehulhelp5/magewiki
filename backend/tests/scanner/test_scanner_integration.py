@@ -507,6 +507,66 @@ async def test_scan_repository_persists_config_fields(demo_store_path: Path, db_
 
 
 @pytest.mark.asyncio
+async def test_scan_repository_requeues_analysis_for_an_xml_only_change_to_a_structural_fact_file(
+    demo_store_path: Path, db_session, tmp_path: Path
+):
+    """Regression test: a module whose only change is to a structural-fact XML
+    file (system.xml here, but the same gap applied to crontab.xml, webapi.xml,
+    db_schema.xml, acl.xml, routes.xml, widget.xml, menu.xml, cache.xml,
+    indexer.xml, mview.xml, and the queue config files) must still have its
+    aggregate hash change and a new analyze_file job enqueued -- otherwise the
+    module never goes back to "pending", config_options never gets regenerated
+    in the AI-written README even though the new ConfigField row the parser
+    just persisted is sitting right there in the database. See CLAUDE.md's
+    "README is stored together with content_hash... so staleness is always
+    knowable" -- this is the case where that guarantee would silently break.
+    """
+    repo_copy = tmp_path / "demo-store"
+    shutil.copytree(demo_store_path, repo_copy)
+    repo_root = str(repo_copy.resolve())
+    await delete_module_if_present(db_session, repo_root, "Vendor_Module")
+
+    system_xml_path = repo_copy / "app/code/Vendor/Module/etc/adminhtml/system.xml"
+    system_xml_path.parent.mkdir(parents=True, exist_ok=True)
+    system_xml_path.write_text(
+        '<?xml version="1.0"?>\n'
+        "<config><system>"
+        '<section id="vendor_module"><label>Vendor Module</label>'
+        '<group id="general"><label>General</label>'
+        '<field id="enabled" type="select"><label>Enabled</label></field>'
+        "</group></section>"
+        "</system></config>",
+        encoding="utf-8",
+    )
+
+    first = await scan_repository(repo_root, db_session)
+    assert first.tasks_enqueued == 8  # the 7 source/fixed files already covered, plus this new system.xml
+
+    module = await db_session.scalar(select(Module).where(Module.repo_root == repo_root, Module.name == "Vendor_Module"))
+    await db_session.execute(
+        update(Module).where(Module.id == module.id).values(state="up_to_date", analyzed_hash=module.current_hash)
+    )
+    await db_session.commit()
+
+    # Only the structural-fact XML file changes -- no PHP file, no composer.json.
+    system_xml_path.write_text(
+        system_xml_path.read_text(encoding="utf-8").replace(">Enabled<", ">Enabled (renamed)<"),
+        encoding="utf-8",
+    )
+
+    second = await scan_repository(repo_root, db_session)
+    assert second.modules[0].files_changed == 1
+    assert second.tasks_enqueued == 1  # a fresh analyze_file job for system.xml, not a silent no-op
+
+    await db_session.refresh(module)
+    assert module.state == "pending"
+    assert module.current_hash != module.analyzed_hash
+
+    fields = (await db_session.scalars(select(ConfigField).where(ConfigField.module_id == module.id))).all()
+    assert fields[0].label == "Enabled (renamed)"
+
+
+@pytest.mark.asyncio
 async def test_scan_repository_persists_db_tables(demo_store_path: Path, db_session, tmp_path: Path):
     repo_copy = tmp_path / "demo-store"
     shutil.copytree(demo_store_path, repo_copy)

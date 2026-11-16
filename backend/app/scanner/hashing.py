@@ -4,7 +4,39 @@ from pathlib import Path
 
 from app.scanner.discovery import walk_module_source_files
 
-_FIXED_FILES = ("etc/module.xml", "composer.json", "etc/di.xml", "etc/events.xml", "etc/schema.graphqls")
+# Every relative path orchestrator.py's Phase A parses into a structural fact
+# (ConfigField, CronJob, WebapiRoute, DbTable, AclResource, Indexer, Mview,
+# RouteConfig, Widget, MenuItem, CacheType, QueueBinding, ...) must be hashed
+# here too -- otherwise an XML-only change to one of them leaves the module's
+# aggregate_hash unchanged, so the module never goes back to "pending" and its
+# AI-written README/ModuleDoc (config_options, features, etc. -- see
+# build_module_synthesis_prompt) never gets regenerated to reflect a fact that
+# *did* get persisted. A new fact source added in a later phase belongs in
+# both places, and in orchestrator.py's Phase A in the same change.
+_FIXED_FILES = (
+    "etc/module.xml",
+    "composer.json",
+    "etc/di.xml",
+    "etc/events.xml",
+    "etc/schema.graphqls",
+    "etc/crontab.xml",
+    "etc/webapi.xml",
+    "etc/adminhtml/system.xml",
+    "etc/db_schema.xml",
+    "etc/communication.xml",
+    "etc/queue_topology.xml",
+    "etc/queue_consumer.xml",
+    "etc/acl.xml",
+    "etc/indexer.xml",
+    "etc/mview.xml",
+    "etc/frontend/routes.xml",
+    "etc/adminhtml/routes.xml",
+    "view/base/widget.xml",
+    "view/frontend/widget.xml",
+    "view/adminhtml/widget.xml",
+    "etc/adminhtml/menu.xml",
+    "etc/cache.xml",
+)
 
 
 def _sha256_file(path: Path) -> str:

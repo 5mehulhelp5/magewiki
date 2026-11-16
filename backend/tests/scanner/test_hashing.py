@@ -40,6 +40,47 @@ def test_compute_module_file_hashes_matches_a_direct_sha256_of_the_file_content(
     assert hashes["composer.json"] == expected
 
 
+def test_compute_module_file_hashes_includes_every_structural_fact_file_when_present(tmp_path: Path):
+    """Regression test: every relative path orchestrator.py's Phase A parses
+    into a structural fact (CronJob, WebapiRoute, ConfigField, DbTable,
+    AclResource, Indexer, Mview, RouteConfig, Widget, MenuItem, CacheType,
+    QueueBinding) must be hashed, or an XML-only change to one of them never
+    changes aggregate_hash and the module never goes back to "pending" (see
+    tests/scanner/test_scanner_integration.py's matching end-to-end test)."""
+    (tmp_path / "etc" / "adminhtml").mkdir(parents=True)
+    (tmp_path / "etc" / "frontend").mkdir(parents=True)
+    (tmp_path / "view" / "base").mkdir(parents=True)
+    (tmp_path / "view" / "frontend").mkdir(parents=True)
+    (tmp_path / "view" / "adminhtml").mkdir(parents=True)
+
+    structural_fact_files = (
+        "etc/crontab.xml",
+        "etc/webapi.xml",
+        "etc/adminhtml/system.xml",
+        "etc/db_schema.xml",
+        "etc/communication.xml",
+        "etc/queue_topology.xml",
+        "etc/queue_consumer.xml",
+        "etc/acl.xml",
+        "etc/indexer.xml",
+        "etc/mview.xml",
+        "etc/frontend/routes.xml",
+        "etc/adminhtml/routes.xml",
+        "view/base/widget.xml",
+        "view/frontend/widget.xml",
+        "view/adminhtml/widget.xml",
+        "etc/adminhtml/menu.xml",
+        "etc/cache.xml",
+    )
+    for relative in structural_fact_files:
+        (tmp_path / relative).write_text("<config/>", encoding="utf-8")
+
+    hashes = compute_module_file_hashes(tmp_path)
+
+    for relative in structural_fact_files:
+        assert relative in hashes, f"{relative} must be hashed so an XML-only change is detected"
+
+
 def test_compute_module_file_hashes_registers_a_source_file_under_its_nested_relative_path(tmp_path: Path):
     (tmp_path / "etc").mkdir()
     (tmp_path / "etc" / "module.xml").write_text("<config/>", encoding="utf-8")
