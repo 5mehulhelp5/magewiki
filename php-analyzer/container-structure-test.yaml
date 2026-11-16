@@ -15,9 +15,6 @@ commandTests:
   - name: "php85 available"
     command: "php85"
     args: ["--version"]
-  - name: "composer installed"
-    command: "composer"
-    args: ["--version"]
   - name: "runs as non-root"
     command: "whoami"
     expectedOutput: ["appuser"]
@@ -27,6 +24,16 @@ fileExistenceTests:
     shouldExist: true
   - name: "phpstan config"
     path: "/opt/analyzer/phpstan.neon"
+    shouldExist: true
+  # composer itself is a builder-only tool now (multi-stage Dockerfile) --
+  # this confirms the thing that actually matters survived the copy into the
+  # runtime stage: composer's own generated vendor/ (phpstan/phpmd/phpcs/
+  # rector/phpunit and their autoloaders), not the composer binary itself.
+  - name: "composer-installed vendor/ present"
+    path: "/opt/analyzer/vendor/autoload.php"
+    shouldExist: true
+  - name: "phpstan binary present"
+    path: "/opt/analyzer/vendor/bin/phpstan"
     shouldExist: true
   - name: "demo-store fixture baked in"
     path: "/app/tests/fixtures/demo-store"

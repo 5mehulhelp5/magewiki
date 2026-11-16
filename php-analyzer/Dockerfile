@@ -8,7 +8,19 @@
 # platform_check.php — no single fixed interpreter version can satisfy every
 # scanned module. app/scanner/php_analyzer_client.py's _pick_php_binary picks
 # which of these three actually runs each tool, per module.
-FROM alpine:edge
+#
+# Multi-stage: composer, git, unzip, and the composer-setup.php installer
+# artifact only exist to put this project's own vendor/ (phpstan/phpmd/phpcs/
+# rector/phpunit and their autoloaders) together -- none of them are ever
+# invoked at runtime (index.php only proc_open()s the tool binaries already
+# inside vendor/bin, never composer itself), so the builder stage below is
+# the only one that installs them. The php83/84/85 runtimes + their
+# extensions are duplicated in both stages on purpose: composer's own
+# platform-check validates the dependencies it's installing against the
+# builder's loaded extensions, and the runner genuinely executes all three
+# interpreters at runtime (_pick_php_binary above), so neither stage can
+# skip them.
+FROM alpine:edge AS builder
 
 # php8X-intl and php8X-pecl-pcov are for run_phpunit() only (see index.php) --
 # the one tool here that actually executes a scanned module's own test code
@@ -24,7 +36,7 @@ FROM alpine:edge
 # FROM alpine:edge comment above for why edge, not a numbered release, is
 # required here in the first place.
 # hadolint ignore=DL3018
-RUN apk add --no-cache git unzip tini \
+RUN apk add --no-cache git unzip \
     php83 php83-phar php83-mbstring php83-tokenizer php83-ctype php83-dom \
         php83-xml php83-xmlwriter php83-simplexml php83-curl php83-openssl php83-iconv \
         php83-intl php83-pecl-pcov \
@@ -72,6 +84,34 @@ RUN --mount=type=secret,id=github_token \
         && composer config -g github-oauth.github.com "$(cat /run/secrets/github_token)" \
         || true) \
     && composer install --no-dev --no-interaction --prefer-source --no-progress
+
+
+FROM alpine:edge AS runner
+
+# Only the runtime: the three php interpreters + tini. No composer, no git,
+# no unzip, no leftover composer-setup.php installer script -- this image is
+# reached only from inside the Docker network (php_analyzer_net is internal-
+# only) and never needs to install or fetch anything of its own again.
+# hadolint ignore=DL3018
+RUN apk add --no-cache tini \
+    php83 php83-phar php83-mbstring php83-tokenizer php83-ctype php83-dom \
+        php83-xml php83-xmlwriter php83-simplexml php83-curl php83-openssl php83-iconv \
+        php83-intl php83-pecl-pcov \
+    php84 php84-phar php84-mbstring php84-tokenizer php84-ctype php84-dom \
+        php84-xml php84-xmlwriter php84-simplexml php84-curl php84-openssl php84-iconv \
+        php84-intl php84-pecl-pcov \
+    php85 php85-phar php85-mbstring php85-tokenizer php85-ctype php85-dom \
+        php85-xml php85-xmlwriter php85-simplexml php85-curl php85-openssl php85-iconv \
+        php85-intl php85-pecl-pcov \
+    && ln -sf /usr/bin/php84 /usr/bin/php
+
+WORKDIR /opt/analyzer
+
+# vendor/ alone (composer's own generated autoload_*.php/platform_check.php
+# live inside it) is everything the running tools need -- this project's own
+# top-level composer.json/composer.lock are a build-time input, never read
+# by index.php at runtime, so they don't need to exist in this stage at all.
+COPY --from=builder /opt/analyzer/vendor ./vendor
 
 COPY php-analyzer/public ./public
 COPY php-analyzer/rector.php ./rector.php

@@ -1,15 +1,17 @@
 # Production image for the Fly deployment -- the existing Dockerfile stays
 # untouched for local docker-compose dev (bind-mounted source, `--reload`).
 # This one skips the dev dependency group (pytest/ruff/mypy, never needed
-# at runtime, only bloat+attack surface in a deployed image) and drops to a
-# non-root user, mirroring frontend/Dockerfile.fly's own dev/prod split for
-# the same reason.
-FROM python:3.13-slim
+# at runtime, only bloat+attack surface in a deployed image), builds in a
+# separate stage (mirrors frontend/Dockerfile.fly's own builder/runner
+# split: poetry itself, pip's cache, and the resolver's work only exist to
+# put .venv together, so they never need to ship in the final image), and
+# drops to a non-root user.
+FROM python:3.13-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     POETRY_NO_INTERACTION=1 \
-    POETRY_VIRTUALENVS_CREATE=false
+    POETRY_VIRTUALENVS_IN_PROJECT=1
 
 RUN pip install "poetry==1.8.3"
 
@@ -23,9 +25,20 @@ RUN poetry install --no-root --without dev
 # CLI/proxy-client tooling (litellm/proxy/client/cli/commands/*.py), which this app
 # never invokes (we only call litellm.acompletion/aembedding). Forcing the upgrade
 # out-of-band of poetry's lock is safe in practice; revisit once litellm relaxes its
-# own pin and this can go back through poetry update normally.
-RUN pip install --no-deps "filelock>=4.0.9,<5"
+# own pin and this can go back through poetry update normally. Installed into the
+# same in-project .venv poetry install just created above (not system site-packages),
+# so it actually ships -- the runner stage below only ever copies that one directory.
+RUN . .venv/bin/activate && pip install --no-cache-dir --no-deps "filelock>=4.0.9,<5"
 
+
+FROM python:3.13-slim AS runner
+
+ENV PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+COPY --from=builder /app/.venv ./.venv
 COPY . .
 
 # Non-root: the deployed Fly image never needs root at runtime.
