@@ -126,6 +126,25 @@ def _collect_sources(tool_name: str, args: dict, result: dict, sources: dict[tup
             _add(r.get("module_id"), r.get("name"))
 
 
+_ENUMERATION_PHRASES = (
+    "how many", "count of", "number of", "show all", "show every", "list all", "list every", "every module",
+    "all modules",
+)
+
+
+def _looks_like_an_enumeration_question(messages: list[dict]) -> bool:
+    """CLAUDE.md's own routing table says counting/"show all" questions must go
+    through list_modules (a real SQL count/filter), not search_modules's top-k,
+    which is not guaranteed complete -- but that's only ever enforced by the
+    system prompt, not by code. This is a narrow, code-level backstop for the
+    clearest case: a question that reads like a count or a full listing,
+    answered without ever calling list_modules at all.
+    """
+    last_user_message = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+    lowered = last_user_message.lower()
+    return any(phrase in lowered for phrase in _ENUMERATION_PHRASES)
+
+
 async def run_agent(session: AsyncSession, messages: list[dict], audience: str) -> AsyncIterator[dict]:
     """Agentic tool-calling loop over the 7 tools in app.agent.tools, then one final
     streamed turn. Yields plain dict events: {"event": "sources"|"token"|"done", ...}.
@@ -143,11 +162,13 @@ async def run_agent(session: AsyncSession, messages: list[dict], audience: str) 
 
     history = [{"role": "system", "content": build_system_prompt(audience)}, *messages]
     sources: dict[tuple, Source] = {}
+    tools_called: set[str] = set()
     tokens_in_total = 0
     tokens_out_total = 0
     cost_total = Decimal(0)
 
     forced_retry_used = False
+    enumeration_retry_used = False
     for _round in range(MAX_TOOL_ROUNDS):
         # Rechecked every round, not just once before the loop — up to
         # MAX_TOOL_ROUNDS rounds each make a real, billed LLM call, and the
@@ -196,11 +217,34 @@ async def run_agent(session: AsyncSession, messages: list[dict], audience: str) 
                     }
                 )
                 continue
+            if (
+                "list_modules" not in tools_called
+                and not enumeration_retry_used
+                and _looks_like_an_enumeration_question(messages)
+            ):
+                # search_modules's top-k is never guaranteed complete, so a
+                # counting/"show all" question answered without list_modules
+                # (a real SQL count/filter) risks an undercount the system
+                # prompt alone doesn't reliably prevent — same one-shot nudge
+                # pattern as the no-tool-called case above.
+                enumeration_retry_used = True
+                history.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "This looks like a counting or \"show all/every\" question. search_modules's top-k "
+                            "results are not guaranteed complete — call list_modules (with filters as needed) "
+                            "for a real count or full list before answering."
+                        ),
+                    }
+                )
+                continue
             break
 
         history.append(message.model_dump())
         for tc in tool_calls:
             tool_name = tc.function.name
+            tools_called.add(tool_name)
             try:
                 args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:

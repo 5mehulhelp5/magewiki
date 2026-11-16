@@ -33,8 +33,9 @@ Once you have enough tool results to answer, stop calling tools and give your fi
 _AUDIENCE_INSTRUCTIONS = {
     AUDIENCE_PM: (
         "Audience: product manager. Use plain business language. Do NOT mention class names, file paths, "
-        "or Magento internals (events, plugins, DI). Prefer the module's pm_text/description/summary fields. "
-        "Cite by module name only."
+        "or Magento internals (events, plugins, DI) — not even ones a tool result happens to include. "
+        "Prefer the module's pm_text/description/summary fields, and translate anything technical a tool "
+        "returns into plain language before it reaches your answer. Cite by module name only."
     ),
     AUDIENCE_DEV: (
         "Audience: developer. Be technical and precise: class names, file paths, events, plugin/observer names. "

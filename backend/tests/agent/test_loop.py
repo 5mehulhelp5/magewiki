@@ -240,6 +240,118 @@ async def test_run_agent_persists_chat_cost(db_session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_agent_forces_a_retry_on_a_counting_question_answered_without_list_modules(db_session, monkeypatch):
+    """CLAUDE.md's routing table says a counting/"show all" question must go
+    through list_modules, not search_modules's top-k (not guaranteed
+    complete) -- enforced so far only by the system prompt. This is the
+    code-level backstop: search_modules alone grounds the answer (so the
+    no-tool-called nudge doesn't fire), but the question still reads as a
+    count, and list_modules was never called -- the loop must nudge once
+    before accepting the answer.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    module = await _make_module(db_session, suffix)
+
+    async def _never_exceeded(session):
+        return False
+
+    monkeypatch.setattr(loop_module, "is_budget_exceeded", _never_exceeded)
+
+    async def fake_search_modules(session, **kwargs):
+        return {"results": [{"module_id": module.id, "module_name": module.name, "relative_path": None}]}
+
+    async def fake_list_modules(session, **kwargs):
+        return {"total": 1, "modules": [{"module_id": module.id, "name": module.name}]}
+
+    monkeypatch.setitem(loop_module.TOOL_FUNCTIONS, "search_modules", fake_search_modules)
+    monkeypatch.setitem(loop_module.TOOL_FUNCTIONS, "list_modules", fake_list_modules)
+
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("stream"):
+            return _fake_stream(["ok"])
+        non_stream_calls = [c for c in calls if not c.get("stream")]
+        n = len(non_stream_calls)
+        if n == 1:
+            return _tool_call_response("search_modules", {"query": "payment"})
+        if n == 2:
+            return _direct_answer_response()  # answers from top-k alone -- must be nudged
+        if n == 3:
+            return _tool_call_response("list_modules", {})  # corrects after the nudge
+        return _direct_answer_response()  # done
+
+    monkeypatch.setattr(loop_module.litellm, "acompletion", fake_acompletion)
+
+    events = [
+        e async for e in run_agent(db_session, [{"role": "user", "content": "how many payment modules do we have?"}], "dev")
+    ]
+
+    non_stream_calls = [c for c in calls if not c.get("stream")]
+    assert len(non_stream_calls) == 4
+
+    last_messages = non_stream_calls[-1]["messages"]
+    assert any(
+        isinstance(m.get("content"), str) and "counting or \"show all" in m["content"] for m in last_messages
+    )
+
+    done_event = next(e for e in events if e["event"] == "done")
+    assert done_event["tokens_in"] > 0
+
+    await db_session.execute(delete(Module).where(Module.id == module.id))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_does_not_nudge_a_counting_question_once_list_modules_was_already_called(
+    db_session, monkeypatch
+):
+    """The nudge from the test above must not keep firing once list_modules has
+    actually been called -- otherwise a legitimately-answered counting
+    question would loop pointlessly."""
+    suffix = uuid.uuid4().hex[:8]
+    module = await _make_module(db_session, suffix)
+
+    async def _never_exceeded(session):
+        return False
+
+    monkeypatch.setattr(loop_module, "is_budget_exceeded", _never_exceeded)
+
+    async def fake_list_modules(session, **kwargs):
+        return {"total": 1, "modules": [{"module_id": module.id, "name": module.name}]}
+
+    monkeypatch.setitem(loop_module.TOOL_FUNCTIONS, "list_modules", fake_list_modules)
+
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("stream"):
+            return _fake_stream(["ok"])
+        non_stream_calls = [c for c in calls if not c.get("stream")]
+        n = len(non_stream_calls)
+        if n == 1:
+            return _tool_call_response("list_modules", {})
+        return _direct_answer_response()
+
+    monkeypatch.setattr(loop_module.litellm, "acompletion", fake_acompletion)
+
+    events = [
+        e async for e in run_agent(db_session, [{"role": "user", "content": "how many modules do we have?"}], "dev")
+    ]
+
+    non_stream_calls = [c for c in calls if not c.get("stream")]
+    assert len(non_stream_calls) == 2  # list_modules call, then straight to the final answer -- no nudge round
+
+    done_event = next(e for e in events if e["event"] == "done")
+    assert done_event["tokens_in"] > 0
+
+    await db_session.execute(delete(Module).where(Module.id == module.id))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
 async def test_run_agent_forces_a_retry_when_first_turn_skips_tools(db_session, monkeypatch):
     """An unconditional direct answer on round 1 (no tool call, so nothing is
     grounded in retrieved data) must not be accepted as-is — the loop should
