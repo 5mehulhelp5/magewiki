@@ -27,7 +27,9 @@ function mod(overrides: Partial<Record<string, unknown>> = {}) {
 // resolving to [] (its own real empty state) instead of silently receiving
 // this test file's /modules fixtures.
 function mockModules(modules: unknown[]) {
-  fetchMock.mockImplementation(async (path: string) => (path === "/modules" ? modules : []));
+  fetchMock.mockImplementation(async (path: string) =>
+    path === "/modules" ? { total: modules.length, modules } : [],
+  );
 }
 
 describe("truncateLabelTail", () => {
@@ -200,7 +202,7 @@ describe("StatsPage", () => {
   });
 
   it("shows the fleet-trend chart's empty state when there is no history yet", async () => {
-    fetchMock.mockImplementation(async (path: string) => (path === "/modules" ? [mod()] : []));
+    fetchMock.mockImplementation(async (path: string) => (path === "/modules" ? { total: 1, modules: [mod()] } : []));
     renderWithQueryClient(<StatsPage />);
 
     await waitFor(() =>
@@ -214,7 +216,7 @@ describe("StatsPage", () => {
   it("renders the fleet-trend chart's line section when history points exist", async () => {
     fetchMock.mockImplementation(async (path: string) =>
       path === "/modules"
-        ? [mod()]
+        ? { total: 1, modules: [mod()] }
         : [
             { scanned_at: "2026-01-01T00:00:00Z", total_findings: 3 },
             { scanned_at: "2026-02-01T00:00:00Z", total_findings: 5 },

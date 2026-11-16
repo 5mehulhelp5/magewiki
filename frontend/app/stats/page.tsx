@@ -28,12 +28,11 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { apiFetch } from "@/lib/api";
-import type { paths } from "@/lib/api-types";
+import type { components, paths } from "@/lib/api-types";
 import { useDocumentTitle } from "@/lib/use-document-title";
 import { useMediaQuery } from "@/lib/use-media-query";
 
-type ModuleSummary =
-  paths["/modules"]["get"]["responses"][200]["content"]["application/json"][number];
+type ModuleSummary = components["schemas"]["ModuleSummary"];
 type FleetTrendPoint =
   paths["/modules/history/trend"]["get"]["responses"][200]["content"]["application/json"][number];
 
@@ -169,7 +168,8 @@ function prettifyCheckType(checkType: string): string {
 }
 
 async function fetchModules(): Promise<ModuleSummary[]> {
-  return apiFetch("/modules");
+  const response = await apiFetch<components["schemas"]["ModuleListResponse"]>("/modules");
+  return response.modules;
 }
 
 async function fetchFleetTrend(): Promise<FleetTrendPoint[]> {

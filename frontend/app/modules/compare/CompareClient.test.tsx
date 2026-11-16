@@ -65,7 +65,9 @@ describe("CompareClient", () => {
   it("shows a module picker when a/b aren't both set", async () => {
     setSearch("");
     fetchMock.mockImplementation(async (path: string) => {
-      if (path === "/modules") return [moduleDetail({ id: 1, name: "Vendor_A" }), moduleDetail({ id: 2, name: "Vendor_B" })];
+      if (path === "/modules") {
+        return { total: 2, modules: [moduleDetail({ id: 1, name: "Vendor_A" }), moduleDetail({ id: 2, name: "Vendor_B" })] };
+      }
       throw new Error(`unexpected path: ${path}`);
     });
 
@@ -84,10 +86,13 @@ describe("CompareClient", () => {
       // A second entry with a *different* repo_root exercises idByName's
       // own repo_root mismatch skip (it must never match across stores).
       if (path === "/modules") {
-        return [
-          moduleDetail({ id: 99, name: "Magento_Backend", repo_root: "/sites/store" }),
-          moduleDetail({ id: 100, name: "Other_Store_Module", repo_root: "/sites/other-store" }),
-        ];
+        return {
+          total: 2,
+          modules: [
+            moduleDetail({ id: 99, name: "Magento_Backend", repo_root: "/sites/store" }),
+            moduleDetail({ id: 100, name: "Other_Store_Module", repo_root: "/sites/other-store" }),
+          ],
+        };
       }
       if (path === "/modules/1") {
         return moduleDetail({
@@ -141,7 +146,9 @@ describe("CompareClient", () => {
   it("picking a module from either dropdown updates the URL and re-renders", async () => {
     setSearch("");
     fetchMock.mockImplementation(async (path: string) => {
-      if (path === "/modules") return [moduleDetail({ id: 1, name: "Vendor_A" }), moduleDetail({ id: 2, name: "Vendor_B" })];
+      if (path === "/modules") {
+        return { total: 2, modules: [moduleDetail({ id: 1, name: "Vendor_A" }), moduleDetail({ id: 2, name: "Vendor_B" })] };
+      }
       if (path === "/modules/1") return moduleDetail({ id: 1, name: "Vendor_A" });
       if (path === "/modules/2") return moduleDetail({ id: 2, name: "Vendor_B" });
       throw new Error(`unexpected path: ${path}`);
@@ -162,7 +169,7 @@ describe("CompareClient", () => {
   it("shows an error for a module that fails to load", async () => {
     setSearch("?a=1&b=2");
     fetchMock.mockImplementation(async (path: string) => {
-      if (path === "/modules") return [];
+      if (path === "/modules") return { total: 0, modules: [] };
       if (path === "/modules/1") throw new Error("boom");
       if (path === "/modules/2") return moduleDetail({ id: 2, name: "Vendor_B" });
       throw new Error(`unexpected path: ${path}`);
@@ -176,7 +183,7 @@ describe("CompareClient", () => {
   it("shows an error for module B specifically when only it fails to load", async () => {
     setSearch("?a=1&b=2");
     fetchMock.mockImplementation(async (path: string) => {
-      if (path === "/modules") return [];
+      if (path === "/modules") return { total: 0, modules: [] };
       if (path === "/modules/1") return moduleDetail({ id: 1, name: "Vendor_A" });
       if (path === "/modules/2") throw new Error("boom");
       throw new Error(`unexpected path: ${path}`);

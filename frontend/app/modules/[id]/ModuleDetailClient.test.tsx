@@ -51,7 +51,7 @@ function mockApis({
   history?: unknown[];
 } = {}) {
   fetchMock.mockImplementation(async (path: string) => {
-    if (path === "/modules") return modules;
+    if (path === "/modules") return { total: modules.length, modules };
     if (path.endsWith("/graph")) return {};
     if (path.endsWith("/history")) return history;
     return module;
@@ -239,7 +239,7 @@ describe("ModuleDetailClient", () => {
 
   describe("README", () => {
     it("shows a loading placeholder while the README fetches", () => {
-      fetchMock.mockImplementation(async (path: string) => (path === "/modules" ? [] : moduleDetail()));
+      fetchMock.mockImplementation(async (path: string) => (path === "/modules" ? { total: 0, modules: [] } : moduleDetail()));
       vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})));
       renderWithQueryClient(<ModuleDetailClient id="1" />);
 
@@ -433,7 +433,7 @@ describe("ModuleDetailClient", () => {
     });
 
     it("surfaces a real fetch error (not 404) as the module-level error state", async () => {
-      fetchMock.mockImplementation(async (path: string) => (path === "/modules" ? [] : moduleDetail()));
+      fetchMock.mockImplementation(async (path: string) => (path === "/modules" ? { total: 0, modules: [] } : moduleDetail()));
       vi.stubGlobal(
         "fetch",
         vi.fn().mockResolvedValue({ status: 500, ok: false, text: async () => "" }),

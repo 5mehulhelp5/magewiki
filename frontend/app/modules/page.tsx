@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { streamSse } from "@/lib/sse";
 import { downloadCsv, toCsv } from "@/lib/csv";
@@ -31,8 +31,8 @@ import {
 } from "@/components/ui/table";
 import type { components, paths } from "@/lib/api-types";
 
-type ModuleSummary =
-  paths["/modules"]["get"]["responses"][200]["content"]["application/json"][number];
+type ModuleListResponse = paths["/modules"]["get"]["responses"][200]["content"]["application/json"];
+type ModuleSummary = ModuleListResponse["modules"][number];
 type ModuleDetail = components["schemas"]["ModuleDetail"];
 type ScanResponse =
   paths["/scan"]["post"]["responses"][200]["content"]["application/json"];
@@ -45,8 +45,49 @@ type ScanStreamEvent =
   | { event: "error"; detail: string };
 type SortKey = "name" | "class_count" | "plugin_count" | "observer_count" | "last_scanned_at";
 
-async function fetchModules(): Promise<ModuleSummary[]> {
-  return apiFetch("/modules");
+// source_type and state are both small, fixed enumerations the backend's own
+// module state machine and scanner discovery logic define (see CLAUDE.md) --
+// listed here directly rather than derived from whatever happens to be
+// present in the current (now server-filtered) page of data, so every
+// filterable value is always offered, not just the ones the active filters
+// happen to still show.
+const SOURCE_TYPES = ["app_code", "vendor", "standalone", "composer_path"];
+const MODULE_STATES = ["pending", "scanning", "analyzing", "embedding", "up_to_date", "failed", "paused_budget"];
+
+type ModulesQueryParams = {
+  search?: string;
+  sourceType?: string;
+  state?: string;
+  enabled?: "true" | "false" | "unknown";
+  repoRoot?: string;
+  finding?: string;
+  hasDoc?: boolean;
+  sortBy: SortKey;
+  sortDir: "asc" | "desc";
+  prioritizeDoc: boolean;
+  limit: number;
+  offset: number;
+};
+
+function buildModulesQuery(params: ModulesQueryParams): string {
+  const qs = new URLSearchParams();
+  if (params.search) qs.set("search", params.search);
+  if (params.sourceType) qs.set("source_type", params.sourceType);
+  if (params.state) qs.set("state", params.state);
+  if (params.enabled) qs.set("enabled", params.enabled);
+  if (params.repoRoot) qs.set("repo_root", params.repoRoot);
+  if (params.finding) qs.set("finding", params.finding);
+  if (params.hasDoc !== undefined) qs.set("has_doc", String(params.hasDoc));
+  qs.set("sort_by", params.sortBy);
+  qs.set("sort_dir", params.sortDir);
+  if (params.prioritizeDoc) qs.set("prioritize_doc", "true");
+  qs.set("limit", String(params.limit));
+  qs.set("offset", String(params.offset));
+  return qs.toString();
+}
+
+async function fetchModules(params: ModulesQueryParams): Promise<ModuleListResponse> {
+  return apiFetch(`/modules?${buildModulesQuery(params)}`);
 }
 
 async function fetchModuleDetail(id: number): Promise<ModuleDetail> {
@@ -467,7 +508,41 @@ export default function ModulesPage() {
   const hasDocFilter = useQueryParam("has_doc");
   const queryClient = useQueryClient();
 
-  const modulesQuery = useQuery({ queryKey: ["modules"], queryFn: fetchModules });
+  const modulesQueryParams: ModulesQueryParams = {
+    search: debouncedSearch.trim() || undefined,
+    sourceType: sourceFilter !== "all" ? sourceFilter : undefined,
+    state: stateFilter !== "all" ? stateFilter : undefined,
+    enabled: enabledFilter !== "all" ? (enabledFilter as "true" | "false" | "unknown") : undefined,
+    repoRoot: repoFilter || undefined,
+    finding: findingFilter || undefined,
+    hasDoc: hasDocFilter === "true" ? true : undefined,
+    sortBy: sortKey,
+    sortDir,
+    prioritizeDoc: !hasUserSorted,
+    limit: pageSize,
+    offset: (page - 1) * pageSize,
+  };
+  const modulesQuery = useQuery({
+    queryKey: ["modules", modulesQueryParams],
+    queryFn: () => fetchModules(modulesQueryParams),
+    // Every filter/sort/page change is a genuinely new queryKey (server-side
+    // now does the filtering), which TanStack Query otherwise treats as a
+    // brand-new query -- isLoading (and so the whole "Loading modules..."
+    // branch below, which replaces the entire filter/table UI) would flip
+    // true on every single keystroke/click instead of just the first load.
+    // keepPreviousData keeps the last page's rows on screen (isFetching
+    // still goes true) while the new one loads in the background.
+    placeholderData: keepPreviousData,
+  });
+  // The fleet's total module count with NO filters applied -- distinct from
+  // modulesQuery's own (filtered) total, used only to tell "nothing scanned
+  // yet" apart from "filters matched nothing" and to render "X of Y" below.
+  // limit: 1 -- only `total` is read from this one, never `modules`.
+  const fleetCountQuery = useQuery({
+    queryKey: ["modules", "fleet-count"],
+    queryFn: () =>
+      fetchModules({ sortBy: "name", sortDir: "asc", prioritizeDoc: false, limit: 1, offset: 0 }),
+  });
   const scanRootsQuery = useQuery({ queryKey: ["scan-roots"], queryFn: fetchScanRoots });
 
   const [scanStatus, setScanStatus] = useState<"idle" | "running" | "done" | "error">("idle");
@@ -561,70 +636,32 @@ export default function ModulesPage() {
     }
   }
 
-  const sources = useMemo(
-    () => Array.from(new Set((modulesQuery.data ?? []).map((m) => m.source_type))).sort(),
-    [modulesQuery.data]
-  );
-  const states = useMemo(
-    () => Array.from(new Set((modulesQuery.data ?? []).map((m) => m.state))).sort(),
-    [modulesQuery.data]
-  );
-
-  const filteredAndSorted = useMemo(() => {
-    const list = (modulesQuery.data ?? []).filter((m) => {
-      if (repoFilter && m.repo_root !== repoFilter) return false;
-      if (findingFilter && !findingFilter.split(",").some((t) => (m.finding_counts[t] ?? 0) > 0)) return false;
-      if (hasDocFilter === "true" && !m.has_module_doc) return false;
-      if (sourceFilter !== "all" && m.source_type !== sourceFilter) return false;
-      if (stateFilter !== "all" && m.state !== stateFilter) return false;
-      if (enabledFilter === "true" && m.enabled !== true) return false;
-      if (enabledFilter === "false" && m.enabled !== false) return false;
-      if (enabledFilter === "unknown" && m.enabled !== null) return false;
-      if (debouncedSearch.trim()) {
-        const q = debouncedSearch.trim().toLowerCase();
-        if (!m.name.toLowerCase().includes(q) && !(m.composer_name ?? "").toLowerCase().includes(q)) {
-          return false;
-        }
-      }
-      return true;
-    });
-    const dir = sortDir === "asc" ? 1 : -1;
-    return [...list].sort((a, b) => {
-      if (!hasUserSorted && a.has_module_doc !== b.has_module_doc) {
-        return a.has_module_doc ? -1 : 1;
-      }
-      const av = a[sortKey];
-      const bv = b[sortKey];
-      if (av < bv) return -1 * dir;
-      if (av > bv) return 1 * dir;
-      return 0;
-    });
-  }, [
-    modulesQuery.data,
-    repoFilter,
-    findingFilter,
-    hasDocFilter,
-    hasUserSorted,
-    debouncedSearch,
-    sourceFilter,
-    stateFilter,
-    enabledFilter,
-    sortKey,
-    sortDir,
-  ]);
+  const modules = modulesQuery.data?.modules ?? [];
+  const total = modulesQuery.data?.total ?? 0;
+  const fleetTotal = fleetCountQuery.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   // Each filter/search input resets the page to 1 directly in its own change
-  // handler below (a plain event-handler setState, not an effect -- see
-  // those handlers). This clamp is the backstop for the cases that don't go
-  // through a handler (repoFilter/findingFilter come from the URL via
-  // useQueryParam, and the list can also just shrink on refetch): never show
-  // a page past the last one.
-  const pageCount = Math.max(1, Math.ceil(filteredAndSorted.length / pageSize));
-  const currentPage = Math.min(page, pageCount);
-  const paginated = useMemo(
-    () => filteredAndSorted.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [filteredAndSorted, currentPage, pageSize]
-  );
+  // handler below (a plain event-handler setState, not this). This clamp is
+  // the backstop for the cases that don't go through a handler
+  // (repoFilter/findingFilter come from the URL via useQueryParam, and the
+  // result set can also just shrink on refetch): never leave `page`
+  // requesting data past the last real page. A conditional setState call
+  // directly in the render body -- not inside an effect -- is React's own
+  // documented pattern for "adjust state in response to a condition
+  // changing while rendering" (https://react.dev/learn/you-might-not-need-an-effect);
+  // it self-terminates the moment `page` no longer exceeds `pageCount`.
+  if (modulesQuery.data && page > pageCount) {
+    setPage(pageCount);
+  }
+
+  async function exportCsv() {
+    // The visible table is just one page -- export every module matching the
+    // current filters, not only what's currently on screen. total is already
+    // known from modulesQuery, so this is exactly one extra request.
+    const all = await fetchModules({ ...modulesQueryParams, limit: Math.max(1, Math.min(total, 5000)), offset: 0 });
+    downloadModulesCsv(all.modules);
+  }
 
   function toggleSort(key: SortKey) {
     setHasUserSorted(true);
@@ -780,11 +817,11 @@ export default function ModulesPage() {
       {modulesQuery.isLoading && <p>Loading modules...</p>}
       {modulesQuery.isError && <p className="text-destructive">Failed to load modules.</p>}
 
-      {modulesQuery.data && modulesQuery.data.length === 0 && (
+      {modulesQuery.data && fleetCountQuery.data && fleetTotal === 0 && (
         <p className="text-muted-foreground">No modules scanned yet.</p>
       )}
 
-      {modulesQuery.data && modulesQuery.data.length > 0 && (
+      {modulesQuery.data && fleetCountQuery.data && fleetTotal > 0 && (
         <>
           <div className="flex flex-wrap items-center gap-2">
             <Input
@@ -806,7 +843,7 @@ export default function ModulesPage() {
               ariaLabel="Filter by source"
             >
               <option value="all">All sources</option>
-              {sources.map((s) => (
+              {SOURCE_TYPES.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
@@ -821,7 +858,7 @@ export default function ModulesPage() {
               ariaLabel="Filter by state"
             >
               <option value="all">All states</option>
-              {states.map((s) => (
+              {MODULE_STATES.map((s) => (
                 <option key={s} value={s}>
                   {s}
                 </option>
@@ -840,16 +877,16 @@ export default function ModulesPage() {
               <option value="false">Disabled</option>
               <option value="unknown">Unknown</option>
             </FilterSelect>
-            <Button type="button" variant="outline" size="sm" onClick={() => downloadModulesCsv(filteredAndSorted)}>
+            <Button type="button" variant="outline" size="sm" onClick={() => void exportCsv()}>
               Export CSV
             </Button>
             <span className="text-sm text-muted-foreground ml-auto">
-              {filteredAndSorted.length} of {modulesQuery.data.length} modules
+              {total} of {fleetTotal} modules
             </span>
           </div>
 
           <div className="flex flex-col gap-3 md:hidden">
-            {paginated.map((m) => (
+            {modules.map((m) => (
               <ModuleCard key={m.id} module={m} />
             ))}
           </div>
@@ -928,7 +965,7 @@ export default function ModulesPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {paginated.map((m) => (
+              {modules.map((m) => (
                 <ModuleRow
                   key={m.id}
                   module={m}
@@ -941,10 +978,10 @@ export default function ModulesPage() {
           </div>
 
           <Pagination
-            page={currentPage}
+            page={page}
             pageCount={pageCount}
             pageSize={pageSize}
-            total={filteredAndSorted.length}
+            total={total}
             onPageChange={setPage}
             onPageSizeChange={(size) => {
               setPageSize(size);

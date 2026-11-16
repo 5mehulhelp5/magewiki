@@ -108,9 +108,9 @@ test("Export CSV downloads a real file with the module data", async ({ page }) =
 });
 
 test("Export CSV respects an active filter instead of exporting everything", async ({ page }) => {
-  // downloadModulesCsv(filteredAndSorted) (app/modules/page.tsx) is called
-  // with the already-filtered array, not the raw query data -- a real data-
-  // wiring behavior distinct from the UI merely *showing* 0 rows.
+  // exportCsv() (app/modules/page.tsx) re-fetches /modules with the current
+  // filters still applied (not an unfiltered export) -- a real data-wiring
+  // behavior distinct from the UI merely *showing* 0 rows.
   await page.goto("/modules");
   await page.getByLabel("Search modules").fill("this-module-name-cannot-possibly-exist-xyz");
   await expect(page.getByText(/0 of \d+ modules/)).toBeVisible();

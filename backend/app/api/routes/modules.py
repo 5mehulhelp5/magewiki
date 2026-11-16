@@ -5,12 +5,12 @@ from collections import Counter
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analyzer.facts import gather_module_facts
@@ -131,6 +131,16 @@ class ModuleSummary(BaseModel):
     # list_modules/list_repos's count-building code, and 3-4 frontend files
     # each). A new check_type now needs zero changes here.
     finding_counts: dict[str, int] = {}
+
+
+class ModuleListResponse(BaseModel):
+    """GET /modules' response -- `total` is the count of modules matching every
+    filter *before* limit/offset, so a paginated caller (the modules browser
+    page) can render "X–Y of total" and a page count without a second request.
+    """
+
+    total: int
+    modules: list[ModuleSummary]
 
 
 class MethodSummary(BaseModel):
@@ -409,23 +419,63 @@ async def scan_stream(request: ScanRequest, session: AsyncSession = Depends(get_
     return StreamingResponse(_scan_sse_stream(request.path, session), media_type="text/event-stream")
 
 
-async def _quality_finding_counts_by_module(session: AsyncSession) -> dict[int, dict[str, int]]:
-    """check_type counts grouped by module_id, for every module — shared by
-    list_modules/list_repos, previously the exact same query copy-pasted in
-    both.
+async def _quality_finding_counts_by_module(
+    session: AsyncSession, module_ids: set[int] | None = None
+) -> dict[int, dict[str, int]]:
+    """check_type counts grouped by module_id — shared by list_modules/
+    list_repos, previously the exact same query copy-pasted in both. Scoped
+    to `module_ids` when given: list_modules is paginated now and only ever
+    needs counts for the one page of modules it's actually returning;
+    list_repos still wants every module's counts, to roll them up per
+    repo_root.
     """
-    rows = await session.execute(
-        select(ModuleQualityFinding.module_id, ModuleQualityFinding.check_type, func.count(ModuleQualityFinding.id))
-        .group_by(ModuleQualityFinding.module_id, ModuleQualityFinding.check_type)
+    query = select(
+        ModuleQualityFinding.module_id, ModuleQualityFinding.check_type, func.count(ModuleQualityFinding.id)
     )
+    if module_ids is not None:
+        query = query.where(ModuleQualityFinding.module_id.in_(module_ids))
+    rows = await session.execute(query.group_by(ModuleQualityFinding.module_id, ModuleQualityFinding.check_type))
     counts_by_module: dict[int, dict[str, int]] = {}
     for module_id, check_type, count in rows:
         counts_by_module.setdefault(module_id, {})[check_type] = count
     return counts_by_module
 
 
-@router.get("/modules", response_model=list[ModuleSummary])
-async def list_modules(session: AsyncSession = Depends(get_session)) -> list[ModuleSummary]:
+_MODULE_SORT_COLUMNS = {
+    "name": Module.name,
+    "last_scanned_at": Module.last_scanned_at,
+}
+
+
+@router.get("/modules", response_model=ModuleListResponse)
+async def list_modules(
+    search: str | None = None,
+    source_type: str | None = None,
+    state: str | None = None,
+    enabled: Literal["true", "false", "unknown"] | None = None,
+    repo_root: str | None = None,
+    # Comma-separated check_type keys (e.g. a Stats tile linking to "every
+    # module with a Magento-upgrade blocker") -- a module matches if it has a
+    # nonzero count for any of them.
+    finding: str | None = None,
+    has_doc: bool | None = None,
+    sort_by: Literal["name", "class_count", "plugin_count", "observer_count", "last_scanned_at"] = "name",
+    sort_dir: Literal["asc", "desc"] = "asc",
+    # Modules with a real AI-generated doc float to the top regardless of
+    # sort_by -- the modules browser page's default view (an only-partially-
+    # analyzed fleet otherwise shows "not analyzed yet" for most rows by
+    # sheer chance), turned off once the user explicitly picks a sort column.
+    prioritize_doc: bool = False,
+    # 5000 by default (not a small page size) so every *other* caller that
+    # just wants "every module" (the Stats page, the compare picker, the
+    # module detail page's cross-reference) keeps working unchanged without
+    # passing limit/offset at all -- this is a hard cap against truly
+    # unbounded growth, not the modules browser page's own page size (it
+    # always passes its real page size explicitly).
+    limit: int = Query(5000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> ModuleListResponse:
     class_count = (
         select(func.count(PhpClass.id))
         .where(PhpClass.module_id == Module.id)
@@ -444,14 +494,64 @@ async def list_modules(session: AsyncSession = Depends(get_session)) -> list[Mod
         .correlate(Module)
         .scalar_subquery()
     )
+    sort_columns = {**_MODULE_SORT_COLUMNS, "class_count": class_count, "plugin_count": plugin_count,
+                    "observer_count": observer_count}
+
+    filters: list[ColumnElement[bool]] = []
+    if search:
+        like = f"%{search}%"
+        filters.append(Module.name.ilike(like) | Module.composer_name.ilike(like))
+    if source_type:
+        filters.append(Module.source_type == source_type)
+    if state:
+        filters.append(Module.state == state)
+    if repo_root:
+        filters.append(Module.repo_root == repo_root)
+    if enabled == "true":
+        filters.append(Module.enabled.is_(True))
+    elif enabled == "false":
+        filters.append(Module.enabled.is_(False))
+    elif enabled == "unknown":
+        filters.append(Module.enabled.is_(None))
+    if has_doc is True:
+        filters.append(ModuleDocument.doc.isnot(None))
+    elif has_doc is False:
+        filters.append(ModuleDocument.doc.is_(None))
+    if finding:
+        check_types = [c.strip() for c in finding.split(",") if c.strip()]
+        if check_types:
+            filters.append(
+                Module.id.in_(
+                    select(ModuleQualityFinding.module_id).where(
+                        ModuleQualityFinding.check_type.in_(check_types)
+                    )
+                )
+            )
+
+    total = (
+        await session.scalar(
+            select(func.count(Module.id))
+            .outerjoin(ModuleDocument, ModuleDocument.module_id == Module.id)
+            .where(*filters)
+        )
+    ) or 0
+
+    sort_column = sort_columns[sort_by]
+    order = sort_column.asc() if sort_dir == "asc" else sort_column.desc()
+    order_by = (ModuleDocument.doc.isnot(None).desc(), order) if prioritize_doc else (order,)
 
     rows = await session.execute(
         select(Module, class_count, plugin_count, observer_count, ModuleDocument.doc)
         .outerjoin(ModuleDocument, ModuleDocument.module_id == Module.id)
-        .order_by(Module.name)
+        .where(*filters)
+        .order_by(*order_by)
+        .limit(limit)
+        .offset(offset)
     )
     module_rows = rows.all()
-    counts_by_module = await _quality_finding_counts_by_module(session)
+    counts_by_module = await _quality_finding_counts_by_module(
+        session, {cast(Module, row[0]).id for row in module_rows}
+    )
 
     summaries = []
     for row in module_rows:
@@ -489,7 +589,7 @@ async def list_modules(session: AsyncSession = Depends(get_session)) -> list[Mod
                 finding_counts=counts_by_module.get(module.id, {}),
             )
         )
-    return summaries
+    return ModuleListResponse(total=total, modules=summaries)
 
 
 class RepoSummary(BaseModel):

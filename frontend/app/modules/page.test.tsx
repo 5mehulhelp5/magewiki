@@ -50,17 +50,77 @@ function setSearch(search: string) {
   window.history.replaceState(null, "", url);
 }
 
+// The page now fetches a filtered/sorted/paginated page from the server
+// instead of filtering/sorting/paginating a full list client-side -- this
+// mock plays the server's role, applying the exact same semantics the real
+// GET /modules route implements, against a plain query string parsed from
+// the request path (e.g. "/modules?search=foo&sort_by=name&limit=25&offset=0").
+// Existing test assertions below ("1 of 3 modules", sort order, page
+// contents, ...) hold unchanged as a result -- what changed is how the data
+// gets to the page, not what the page is expected to show.
+type MockModule = Record<string, unknown>;
+
+function simulateModulesEndpoint(modules: MockModule[], queryString: string) {
+  const params = new URLSearchParams(queryString);
+  const search = params.get("search")?.toLowerCase();
+  const sourceType = params.get("source_type");
+  const state = params.get("state");
+  const enabled = params.get("enabled");
+  const repoRoot = params.get("repo_root");
+  const finding = params.get("finding");
+  const hasDoc = params.get("has_doc");
+  const sortBy = (params.get("sort_by") ?? "name") as keyof MockModule;
+  const sortDir = params.get("sort_dir") === "desc" ? -1 : 1;
+  const prioritizeDoc = params.get("prioritize_doc") === "true";
+  const limit = Number(params.get("limit") ?? 25);
+  const offset = Number(params.get("offset") ?? 0);
+
+  const filtered = modules.filter((m) => {
+    if (search) {
+      const name = String(m.name ?? "").toLowerCase();
+      const composerName = String(m.composer_name ?? "").toLowerCase();
+      if (!name.includes(search) && !composerName.includes(search)) return false;
+    }
+    if (sourceType && m.source_type !== sourceType) return false;
+    if (state && m.state !== state) return false;
+    if (enabled === "true" && m.enabled !== true) return false;
+    if (enabled === "false" && m.enabled !== false) return false;
+    if (enabled === "unknown" && m.enabled !== null) return false;
+    if (repoRoot && m.repo_root !== repoRoot) return false;
+    if (finding) {
+      const counts = (m.finding_counts ?? {}) as Record<string, number>;
+      if (!finding.split(",").some((t) => (counts[t] ?? 0) > 0)) return false;
+    }
+    if (hasDoc === "true" && !m.has_module_doc) return false;
+    if (hasDoc === "false" && m.has_module_doc) return false;
+    return true;
+  });
+
+  const sorted = [...filtered].sort((a, b) => {
+    if (prioritizeDoc && a.has_module_doc !== b.has_module_doc) {
+      return a.has_module_doc ? -1 : 1;
+    }
+    const av = a[sortBy] as string | number;
+    const bv = b[sortBy] as string | number;
+    if (av < bv) return -1 * sortDir;
+    if (av > bv) return 1 * sortDir;
+    return 0;
+  });
+
+  return { total: sorted.length, modules: sorted.slice(offset, offset + limit) };
+}
+
 function mockApi({
   modules = [mod()],
   scanRoots = { scan_roots: ["/sites"] },
   detail,
 }: {
-  modules?: unknown[];
+  modules?: MockModule[];
   scanRoots?: { scan_roots: string[] };
   detail?: Record<string, unknown>;
 } = {}) {
   fetchMock.mockImplementation(async (path: string) => {
-    if (path === "/modules") return modules;
+    if (path.startsWith("/modules?")) return simulateModulesEndpoint(modules, path.split("?")[1]);
     if (path === "/scan-roots") return scanRoots;
     if (path.startsWith("/modules/")) return detail ?? { quality_findings: [] };
     throw new Error(`unexpected path: ${path}`);
@@ -88,7 +148,7 @@ describe("ModulesPage", () => {
 
   it("shows an error state", async () => {
     fetchMock.mockImplementation(async (path: string) => {
-      if (path === "/modules") throw new Error("boom");
+      if (path.startsWith("/modules?")) throw new Error("boom");
       return { scan_roots: [] };
     });
     renderWithQueryClient(<ModulesPage />);
@@ -305,12 +365,17 @@ describe("ModulesPage", () => {
       let rows = within(table).getAllByRole("row").slice(1);
       expect(within(rows[0]).getByText("Alpha")).toBeInTheDocument();
 
+      // Sorting now re-fetches from the server (a new sort_by/sort_dir
+      // query param), unlike the old client-side-filter version where this
+      // was a synchronous re-render -- each reorder needs its own waitFor.
       await user.click(screen.getByRole("button", { name: /^Name/ }));
-      rows = within(table).getAllByRole("row").slice(1);
-      expect(within(rows[0]).getByText("Beta")).toBeInTheDocument();
+      await waitFor(() => {
+        rows = within(table).getAllByRole("row").slice(1);
+        expect(within(rows[0]).getByText("Beta")).toBeInTheDocument();
+      });
 
       await user.click(screen.getByRole("button", { name: /^Classes/ }));
-      expect(screen.getByRole("button", { name: /^Classes/ })).toHaveTextContent("↑");
+      await waitFor(() => expect(screen.getByRole("button", { name: /^Classes/ })).toHaveTextContent("↑"));
     });
 
     it("puts AI-analyzed modules first by default, regardless of name, until the user explicitly sorts", async () => {
@@ -340,8 +405,10 @@ describe("ModulesPage", () => {
       // its own merits rather than by coincidence.
       await user.click(screen.getByRole("button", { name: /^Name/ }));
       await user.click(screen.getByRole("button", { name: /^Name/ }));
-      rows = within(table).getAllByRole("row").slice(1);
-      expect(within(rows[0]).getByText("Alpha")).toBeInTheDocument();
+      await waitFor(() => {
+        rows = within(table).getAllByRole("row").slice(1);
+        expect(within(rows[0]).getByText("Alpha")).toBeInTheDocument();
+      });
     });
   });
 
@@ -456,7 +523,7 @@ describe("ModulesPage", () => {
 
     it("shows an error message when the expanded row's detail fetch fails", async () => {
       fetchMock.mockImplementation(async (path: string) => {
-        if (path === "/modules") return [mod()];
+        if (path.startsWith("/modules?")) return simulateModulesEndpoint([mod()], path.split("?")[1]);
         if (path === "/scan-roots") return { scan_roots: [] };
         throw new Error("boom");
       });
@@ -560,7 +627,11 @@ describe("ModulesPage", () => {
       // The 5th module event triggers a real refetch of /modules -- called at
       // least 3 times total (initial load + throttled refetch + the final
       // "done" refetch would follow if sent).
-      await waitFor(() => expect(fetchMock.mock.calls.filter((c) => c[0] === "/modules").length).toBeGreaterThanOrEqual(2));
+      await waitFor(() =>
+        expect(
+          fetchMock.mock.calls.filter((c) => (c[0] as string).startsWith("/modules?")).length,
+        ).toBeGreaterThanOrEqual(2),
+      );
     });
 
     it("shows the multi-store prefix when more than one store was scanned", async () => {

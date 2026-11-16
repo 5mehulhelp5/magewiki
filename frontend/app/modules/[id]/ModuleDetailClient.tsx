@@ -334,7 +334,8 @@ async function fetchModule(id: string): Promise<ModuleDetail> {
 }
 
 async function fetchModules(): Promise<ModuleSummary[]> {
-  return apiFetch("/modules");
+  const response = await apiFetch<components["schemas"]["ModuleListResponse"]>("/modules");
+  return response.modules;
 }
 
 async function fetchHistory(id: string): Promise<ModuleHistoryEntry[]> {

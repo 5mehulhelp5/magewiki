@@ -875,6 +875,18 @@ export interface components {
             /** Class Name */
             class_name: string | null;
         };
+        /**
+         * ModuleListResponse
+         * @description GET /modules' response -- `total` is the count of modules matching every
+         *     filter *before* limit/offset, so a paginated caller (the modules browser
+         *     page) can render "X–Y of total" and a page count without a second request.
+         */
+        ModuleListResponse: {
+            /** Total */
+            total: number;
+            /** Modules */
+            modules: components["schemas"]["ModuleSummary"][];
+        };
         /** ModuleMenuItemSummary */
         ModuleMenuItemSummary: {
             /** Menu Item Id */
@@ -1340,7 +1352,20 @@ export interface operations {
     };
     list_modules_modules_get: {
         parameters: {
-            query?: never;
+            query?: {
+                search?: string | null;
+                source_type?: string | null;
+                state?: string | null;
+                enabled?: ("true" | "false" | "unknown") | null;
+                repo_root?: string | null;
+                finding?: string | null;
+                has_doc?: boolean | null;
+                sort_by?: "name" | "class_count" | "plugin_count" | "observer_count" | "last_scanned_at";
+                sort_dir?: "asc" | "desc";
+                prioritize_doc?: boolean;
+                limit?: number;
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1353,7 +1378,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ModuleSummary"][];
+                    "application/json": components["schemas"]["ModuleListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

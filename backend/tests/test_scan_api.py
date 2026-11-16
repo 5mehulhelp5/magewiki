@@ -40,7 +40,7 @@ async def test_scan_and_list_modules(demo_store_path: Path, db_session: AsyncSes
 
         list_response = await client.get("/modules")
         assert list_response.status_code == 200
-        modules = list_response.json()
+        modules = list_response.json()["modules"]
         vendor_module = next(m for m in modules if m["id"] == module_id)
         assert vendor_module["composer_name"] == "vendor/module-sample"
         assert vendor_module["setup_version"] == "1.0.0"
@@ -94,7 +94,7 @@ async def test_scan_and_list_modules(demo_store_path: Path, db_session: AsyncSes
         await db_session.commit()
 
         list_response = await client.get("/modules")
-        vendor_module = next(m for m in list_response.json() if m["id"] == module_id)
+        vendor_module = next(m for m in list_response.json()["modules"] if m["id"] == module_id)
         assert vendor_module["tags"] == ["payments", "checkout"]
 
         detail_response = await client.get(f"/modules/{module_id}")
