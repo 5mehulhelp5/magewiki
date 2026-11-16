@@ -22,6 +22,15 @@ spec:
           envFrom:
             - configMapRef:
                 name: magewiki-config
+          # Same reasoning as api.yaml's own resources block. `next dev`
+          # is noticeably heavier than a production `next start` would be.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
 ---
 apiVersion: v1
 kind: Service

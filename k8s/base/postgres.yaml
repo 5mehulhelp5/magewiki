@@ -33,6 +33,14 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+          # Same reasoning as api.yaml's own resources block.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "$(POSTGRES_USER)"]

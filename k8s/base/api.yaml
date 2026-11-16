@@ -24,6 +24,17 @@ spec:
                 name: magewiki-config
             - secretRef:
                 name: magewiki-secrets
+          # Starting points for a demo/kind cluster, not production-tuned --
+          # without these every pod here got BestEffort QoS, the first class
+          # evicted under node memory pressure, so one pod running hot could
+          # take the whole cluster down with it instead of being contained.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           readinessProbe:
             httpGet:
               path: /health

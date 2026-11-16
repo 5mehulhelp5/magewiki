@@ -18,6 +18,38 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          # Same reasoning as api.yaml's own resources block -- sized higher
+          # than api/worker since this runs PHPStan/PHPMD/phpcs/Rector (and
+          # run_phpunit()) against a scanned module's own real code, across
+          # three co-installed PHP runtimes.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          # Previously missing entirely, unlike every other service here --
+          # a hung PHP process (e.g. a stuck phpunit subprocess despite
+          # tini reaping) left the pod marked Ready forever, with no
+          # self-healing. `php -S` (index.php's CMD) is single-threaded and
+          # blocks for the duration of whatever it's processing, so the
+          # liveness probe's own failureThreshold*periodSeconds (150s) is
+          # deliberately well past run_phpunit()'s own worst case
+          # (PHPUNIT_TIMEOUT_SECONDS = 90s, plus a 5s SIGKILL grace period)
+          # -- a probe timing this tight would restart a pod that's still
+          # legitimately working, not actually hung.
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 10
 ---
 apiVersion: v1
 kind: Service

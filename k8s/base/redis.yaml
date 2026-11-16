@@ -17,6 +17,14 @@ spec:
           image: redis:7-alpine
           ports:
             - containerPort: 6379
+          # Same reasoning as api.yaml's own resources block.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
           readinessProbe:
             exec:
               command: ["redis-cli", "ping"]

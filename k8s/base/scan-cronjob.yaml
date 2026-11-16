@@ -4,6 +4,15 @@ metadata:
   name: scan-demo-store
 spec:
   schedule: "0 3 * * *"
+  # Forbid, not the default Allow: a scan of a large repo running past 24h,
+  # or a manually triggered `kubectl create job --from=cronjob/scan-demo-
+  # store` while the nightly one is still in flight, would otherwise let
+  # the cluster schedule two overlapping Jobs. The app-level Postgres
+  # advisory lock (scan_repository) already stops them from duplicating
+  # work, but this is a free, standard k8s-level second layer of the same
+  # defense -- same reasoning CLAUDE.md already applies elsewhere
+  # (php-analyzer's network isolation + non-root + tini).
+  concurrencyPolicy: Forbid
   jobTemplate:
     spec:
       template:
