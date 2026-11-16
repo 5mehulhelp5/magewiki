@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Module, ModuleHistorySnapshot, ModuleQualityFinding
@@ -53,6 +54,26 @@ async def _finding_counts_by_module(session: AsyncSession, root: Path) -> dict[i
     return counts
 
 
+async def _latest_snapshot_by_module(session: AsyncSession, root: Path) -> dict[int, ModuleHistorySnapshot]:
+    """Each module's own most recent snapshot, scoped to `root`, in one query --
+    write_history_snapshots previously ran this as a separate
+    `ORDER BY scanned_at DESC LIMIT 1` per module, inside its per-module loop, so
+    a fleet of hundreds/thousands of modules meant that many sequential round
+    trips on *every* scan (by design -- every module in root, not just the ones
+    this scan actually touched). DISTINCT ON (module_id) collapses it to one.
+    """
+    rows = (
+        await session.execute(
+            select(ModuleHistorySnapshot)
+            .join(Module, Module.id == ModuleHistorySnapshot.module_id)
+            .where(Module.repo_root == str(root))
+            .ext(distinct_on(ModuleHistorySnapshot.module_id))
+            .order_by(ModuleHistorySnapshot.module_id, ModuleHistorySnapshot.scanned_at.desc())
+        )
+    ).scalars().all()
+    return {row.module_id: row for row in rows}
+
+
 async def write_history_snapshots(
     session: AsyncSession, root: Path, alertable_check_types: tuple[str, ...] = ()
 ) -> list[ModuleAlert]:
@@ -78,6 +99,7 @@ async def write_history_snapshots(
     ).all()
 
     finding_counts_by_module = await _finding_counts_by_module(session, root)
+    latest_snapshot_by_module = await _latest_snapshot_by_module(session, root)
     alerts: list[ModuleAlert] = []
 
     for module_id, module_name, current_hash, state, enabled in module_rows:
@@ -88,12 +110,7 @@ async def write_history_snapshots(
             finding_counts=finding_counts_by_module.get(module_id, {}),
         )
 
-        latest = await session.scalar(
-            select(ModuleHistorySnapshot)
-            .where(ModuleHistorySnapshot.module_id == module_id)
-            .order_by(ModuleHistorySnapshot.scanned_at.desc())
-            .limit(1)
-        )
+        latest = latest_snapshot_by_module.get(module_id)
         previous = (
             ModuleHistoryState(
                 current_hash=latest.current_hash,

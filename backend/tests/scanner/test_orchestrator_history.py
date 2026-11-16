@@ -82,6 +82,40 @@ async def test_a_code_change_writes_a_second_snapshot(tmp_path: Path, db_session
 
 
 @pytest.mark.asyncio
+async def test_each_modules_own_latest_snapshot_is_tracked_independently_across_a_fleet(tmp_path: Path, db_session):
+    """Regression test for the batched DISTINCT ON lookup replacing a per-
+    module query: with several modules in one repo_root, only the module
+    whose own files actually changed should get a second snapshot -- an
+    unrelated module's row must not get grouped into, or clobber, another
+    module's "previous" state.
+    """
+    repo_root = tmp_path / "repo"
+    _write_module(repo_root / "app" / "code" / "Vendor" / "A", "Vendor_A")
+    _write_module(repo_root / "app" / "code" / "Vendor" / "B", "Vendor_B")
+    _write_module(repo_root / "app" / "code" / "Vendor" / "C", "Vendor_C")
+
+    async for _event in scan_repository_events(str(repo_root), db_session):
+        pass
+
+    _write_module(repo_root / "app" / "code" / "Vendor" / "B", "Vendor_B", setup_version="1.0.1")
+
+    async for _event in scan_repository_events(str(repo_root), db_session):
+        pass
+
+    for name, expected_count in (("Vendor_A", 1), ("Vendor_B", 2), ("Vendor_C", 1)):
+        module = await db_session.scalar(select(Module).where(Module.repo_root == str(repo_root), Module.name == name))
+        snapshots = (
+            await db_session.scalars(
+                select(ModuleHistorySnapshot)
+                .where(ModuleHistorySnapshot.module_id == module.id)
+                .order_by(ModuleHistorySnapshot.scanned_at)
+            )
+        ).all()
+        assert len(snapshots) == expected_count, name
+        assert snapshots[-1].current_hash == module.current_hash, name
+
+
+@pytest.mark.asyncio
 async def test_a_scan_that_finds_a_new_secret_fires_the_quality_alert_webhook(tmp_path: Path, db_session, monkeypatch):
     sent = []
 
