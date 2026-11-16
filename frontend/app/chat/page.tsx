@@ -47,7 +47,17 @@ type DisplayMessage = {
   content: string;
   sources?: Source[];
   error?: string;
+  usage?: { tokensIn: number; tokensOut: number; costUsd: string };
 };
+
+// cost_usd arrives as a decimal string (e.g. "0.0012") -- Number() on it is
+// safe (the backend always sends a plain numeric literal, never "NaN"/""),
+// but formatting defensively here means a malformed value renders as "$0.0000"
+// instead of "$NaN".
+function formatCostUsd(costUsd: string): string {
+  const value = Number(costUsd);
+  return `$${(Number.isFinite(value) ? value : 0).toFixed(4)}`;
+}
 
 async function streamChat(
   messages: { role: string; content: string }[],
@@ -146,6 +156,18 @@ export default function ChatPage() {
               next[next.length - 1] = { ...last, sources: event.sources };
             } else if (event.event === "error") {
               next[next.length - 1] = { ...last, error: event.detail };
+            } else if (event.event === "done") {
+              // Per-answer cost/usage the backend already computes (see
+              // CLAUDE.md's "Response: SSE stream with sources, token, done
+              // (token usage) events") -- previously received and silently
+              // dropped here. Skipped when both are 0 (the budget-exceeded
+              // early-exit path, where an error is already shown instead).
+              if (event.tokens_in > 0 || event.tokens_out > 0) {
+                next[next.length - 1] = {
+                  ...last,
+                  usage: { tokensIn: event.tokens_in, tokensOut: event.tokens_out, costUsd: event.cost_usd },
+                };
+              }
             }
             return next;
           });
@@ -243,6 +265,11 @@ export default function ChatPage() {
             )}
             {m.error && <p className="text-destructive text-sm mt-1">{m.error}</p>}
             {m.sources && <SourceChips sources={m.sources} />}
+            {m.usage && (
+              <p className="text-muted-foreground/70 text-xs mt-1">
+                {m.usage.tokensIn + m.usage.tokensOut} tokens · {formatCostUsd(m.usage.costUsd)}
+              </p>
+            )}
           </div>
         ))}
       </div>

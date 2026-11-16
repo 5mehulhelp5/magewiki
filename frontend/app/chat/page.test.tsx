@@ -212,6 +212,38 @@ describe("ChatPage", () => {
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
+  it("shows the done event's token usage and cost under the answer", async () => {
+    streamSseMock.mockImplementation(async (_url, _body, onEvent: (e: ChatEvent) => void) => {
+      onEvent({ event: "token", text: "answer" });
+      onEvent({ event: "done", tokens_in: 120, tokens_out: 30, cost_usd: "0.0042" });
+    });
+    const user = userEvent.setup();
+    render(<ChatPage />);
+
+    await user.type(screen.getByLabelText("Chat message"), "hi");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(screen.getByText("150 tokens · $0.0042")).toBeInTheDocument());
+  });
+
+  it("does not show a token usage line when the done event reports zero tokens", async () => {
+    // The budget-exceeded early-exit path sends tokens_in/tokens_out as 0
+    // alongside its own "error" event -- showing "0 tokens · $0.0000" there
+    // would just be noise next to the error message already shown.
+    streamSseMock.mockImplementation(async (_url, _body, onEvent: (e: ChatEvent) => void) => {
+      onEvent({ event: "error", detail: "Monthly LLM budget exceeded." });
+      onEvent({ event: "done", tokens_in: 0, tokens_out: 0, cost_usd: "0" });
+    });
+    const user = userEvent.setup();
+    render(<ChatPage />);
+
+    await user.type(screen.getByLabelText("Chat message"), "hi");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(screen.getByText("Monthly LLM budget exceeded.")).toBeInTheDocument());
+    expect(screen.queryByText(/tokens ·/)).not.toBeInTheDocument();
+  });
+
   it("renders a backend error event inline", async () => {
     streamSseMock.mockImplementation(async (_url, _body, onEvent: (e: ChatEvent) => void) => {
       onEvent({ event: "error", detail: "Monthly LLM budget exceeded." });
