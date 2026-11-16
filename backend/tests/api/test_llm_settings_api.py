@@ -349,6 +349,40 @@ async def test_patch_changing_embedding_model_with_confirmation_requeues_affecte
 
 
 @pytest.mark.asyncio
+async def test_patch_changing_embedding_model_rolls_back_everything_when_enqueueing_fails(
+    up_to_date_module, monkeypatch
+):
+    """Regression test: previously the module's state flip to "embedding" (and
+    the config row's new embedding_model) were committed BEFORE the enqueue
+    loop ran, so a Redis hiccup partway through left the module stuck in
+    "embedding" forever with no job ever queued and no sweeper to revive it.
+    Enqueueing now happens before the commit, so a failure here must leave
+    everything exactly as it was -- nothing switched, nothing stuck -- and the
+    whole PATCH can just be retried.
+    """
+
+    async def _raise(*args, **kwargs):
+        raise ConnectionError("redis is unreachable")
+
+    monkeypatch.setattr("app.api.routes.llm_settings.get_arq_pool", _raise)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch(
+            "/settings/llm",
+            json={"embedding_model": "openai/text-embedding-3-large", "confirm_reembed": True},
+        )
+        unchanged = await client.get("/settings/llm")
+
+    assert response.status_code == 502
+    assert unchanged.json()["embedding_model"] == settings.embedding_model  # rolled back, not persisted
+
+    async with async_session_factory() as session:
+        refreshed = await session.get(Module, up_to_date_module.id)
+        assert refreshed.state == "up_to_date"  # not stuck in "embedding"
+
+
+@pytest.mark.asyncio
 async def test_patch_setting_embedding_model_to_its_own_current_value_does_not_require_confirmation(
     up_to_date_module,
 ):

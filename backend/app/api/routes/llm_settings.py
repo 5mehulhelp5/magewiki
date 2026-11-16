@@ -180,25 +180,41 @@ async def update_llm_settings(
             for m in reembed_modules:
                 m.state = "embedding"
 
+    # Enqueue every reembed job BEFORE committing any of this request's changes
+    # (the config row's new embedding_model, and each module's state flip to
+    # "embedding") -- previously the commit came first, so a Redis hiccup
+    # partway through the enqueue loop still left every reembed_modules row
+    # permanently stuck in "embedding" with no job ever queued for it (and no
+    # existing sweeper ever revisits that state). Enqueueing first means a
+    # failure here rolls back to a clean, already-committed-before-this-request
+    # state -- nothing switched, nothing stuck -- and the whole PATCH can just
+    # be retried.
+    if reembed_modules:
+        try:
+            pool = await get_arq_pool()
+            for m in reembed_modules:
+                await pool.enqueue_job(
+                    "embed_chunks",
+                    m.id,
+                    m.current_hash,
+                    # Distinct from the job_id synthesize_module would normally use
+                    # for this same (module_id, current_hash) pair — the module's
+                    # own hash hasn't changed here, only the global embedding
+                    # model, so reusing that job_id risks ARQ treating this as a
+                    # duplicate of an already-completed job and silently skipping it.
+                    _job_id=f"embed:{m.id}:{m.current_hash}:reembed:{effective.model}",
+                )
+        except Exception as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=502,
+                detail=f"failed to queue re-embed jobs, no settings were changed — retry the request: {exc}",
+            ) from exc
+
     await session.commit()
     await session.refresh(row)
 
-    modules_queued = None
-    if reembed_modules:
-        pool = await get_arq_pool()
-        for m in reembed_modules:
-            await pool.enqueue_job(
-                "embed_chunks",
-                m.id,
-                m.current_hash,
-                # Distinct from the job_id synthesize_module would normally use
-                # for this same (module_id, current_hash) pair — the module's
-                # own hash hasn't changed here, only the global embedding
-                # model, so reusing that job_id risks ARQ treating this as a
-                # duplicate of an already-completed job and silently skipping it.
-                _job_id=f"embed:{m.id}:{m.current_hash}:reembed:{effective.model}",
-            )
-        modules_queued = len(reembed_modules)
+    modules_queued = len(reembed_modules) if reembed_modules else None
 
     response = await _effective_response(session, row)
     response.modules_queued_for_reembed = modules_queued
