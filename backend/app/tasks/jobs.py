@@ -14,7 +14,7 @@ from app.analyzer.embeddings import (
     build_file_chunk_text,
     build_method_chunk_text,
     build_module_chunk_text,
-    embed_text,
+    embed_texts_batch,
     hash_text,
 )
 from app.analyzer.facts import gather_module_facts, known_config_paths, known_sources
@@ -51,6 +51,13 @@ from app.scanner.orchestrator import ScanAlreadyInProgressError, scan_repository
 from app.tasks.queue import get_arq_pool
 
 logger = logging.getLogger(__name__)
+
+# How many cache-miss chunks go into one litellm.aembedding(input=[...]) call in
+# embed_chunks below. Well under OpenAI's own batch embeddings limit (2048
+# inputs), chosen conservatively since this same code path also has to work
+# against a local Ollama server, which doesn't necessarily handle as large a
+# batch gracefully.
+_EMBED_BATCH_SIZE = 64
 
 
 @asynccontextmanager
@@ -332,24 +339,30 @@ async def embed_chunks(ctx: dict | None, module_id: int, module_current_hash: st
 
             misses = [s for s in hashed_specs if s[4] not in embedding_by_hash]
             if misses:
-                # Rechecked on every iteration, not just once before the loop — a
-                # module with many cache misses makes many real, billed calls here,
-                # and the budget can cross its limit partway through. Aborting mid-
-                # loop (rather than only before it) still returns before the
-                # chunk-rebuild below, which otherwise would KeyError on the
-                # embeddings this abort left un-fetched in embedding_by_hash.
-                for _ct, _rp, _mid, txt, h in misses:
+                for batch_start in range(0, len(misses), _EMBED_BATCH_SIZE):
+                    batch = misses[batch_start : batch_start + _EMBED_BATCH_SIZE]
+                    # Rechecked before every batch, not just once before the loop —
+                    # a module with many cache misses makes several real, billed
+                    # batch calls here, and the budget can cross its limit partway
+                    # through. Aborting mid-loop (rather than only before it) still
+                    # returns before the chunk-rebuild below, which otherwise would
+                    # KeyError on the embeddings this abort left un-fetched in
+                    # embedding_by_hash.
                     if await is_budget_exceeded(session):
                         await pause_module_for_budget(session, module_id, module_current_hash)
                         return
 
-                    vector, result = await embed_text(
-                        txt, model=embed_config.model, api_key=embed_config.api_key, api_base=embed_config.api_base
+                    embedded = await embed_texts_batch(
+                        [txt for _ct, _rp, _mid, txt, _h in batch],
+                        model=embed_config.model,
+                        api_key=embed_config.api_key,
+                        api_base=embed_config.api_base,
                     )
-                    await get_or_create_cache_entry(
-                        session, h, embed_config.model, EMBEDDING_PROMPT_VERSION, "embedding", result
-                    )
-                    embedding_by_hash[h] = vector
+                    for (_ct, _rp, _mid, _txt, h), (vector, result) in zip(batch, embedded, strict=True):
+                        await get_or_create_cache_entry(
+                            session, h, embed_config.model, EMBEDDING_PROMPT_VERSION, "embedding", result
+                        )
+                        embedding_by_hash[h] = vector
 
             await session.execute(delete(Chunk).where(Chunk.module_id == module_id))
             for ct, rp, mid, txt, h in hashed_specs:

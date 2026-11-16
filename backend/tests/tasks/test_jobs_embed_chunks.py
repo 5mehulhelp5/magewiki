@@ -34,15 +34,18 @@ def _fake_doc() -> ModuleDoc:
     )
 
 
-def _fake_embed_text(call_log: list[str]):
-    async def _fake(text: str, **kwargs):
-        call_log.append(text)
-        vector = [0.0] * 1536
-        vector[len(text) % 1536] = 1.0
-        result = LlmCallResult(
-            response_json={"embedding": vector}, tokens_in=10, tokens_out=0, cost_usd=Decimal("0.0001")
-        )
-        return vector, result
+def _fake_embed_texts_batch(call_log: list[str]):
+    async def _fake(texts: list[str], **kwargs):
+        results = []
+        for text in texts:
+            call_log.append(text)
+            vector = [0.0] * 1536
+            vector[len(text) % 1536] = 1.0
+            result = LlmCallResult(
+                response_json={"embedding": vector}, tokens_in=10, tokens_out=0, cost_usd=Decimal("0.0001")
+            )
+            results.append((vector, result))
+        return results
 
     return _fake
 
@@ -98,7 +101,7 @@ async def test_embed_chunks_builds_module_file_and_method_chunks(demo_store_path
     module = await _reach_embedding_state(demo_store_path, db_session, monkeypatch)
 
     call_log: list[str] = []
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _fake_embed_text(call_log))
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _fake_embed_texts_batch(call_log))
 
     await embed_chunks(None, module.id, module.current_hash)
 
@@ -151,7 +154,7 @@ async def test_embed_chunks_skips_a_method_with_null_line_numbers(demo_store_pat
     await db_session.commit()
 
     call_log: list[str] = []
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _fake_embed_text(call_log))
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _fake_embed_texts_batch(call_log))
 
     await embed_chunks(None, module.id, module.current_hash)
 
@@ -169,7 +172,7 @@ async def test_embed_chunks_pauses_on_budget_exceeded(demo_store_path: Path, db_
 
     call_log: list[str] = []
     monkeypatch.setattr("app.tasks.jobs.is_budget_exceeded", _always_exceeded)
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _fake_embed_text(call_log))
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _fake_embed_texts_batch(call_log))
 
     await embed_chunks(None, module.id, module.current_hash)
 
@@ -185,33 +188,36 @@ async def test_embed_chunks_pauses_on_budget_exceeded(demo_store_path: Path, db_
 async def test_embed_chunks_rechecks_budget_mid_loop_not_just_once_before_it(
     demo_store_path: Path, db_session, monkeypatch
 ):
-    """Regression test: a module with many cache misses makes many real, billed
-    embed_text calls in one job — the budget check used to run only once before
-    the loop, so a budget that crossed its limit partway through still let every
-    remaining miss call through uncounted. Simulate the limit being crossed after
-    the first call, and confirm the loop stops there instead of running all 10.
+    """Regression test: a module with many cache misses makes several real,
+    billed embed_texts_batch calls in one job — the budget check used to run
+    only once before the loop, so a budget that crossed its limit partway
+    through still let every remaining batch through uncounted. Batch size is
+    shrunk to 3 (10 misses -> 4 batches of 3/3/3/1) so crossing the limit after
+    the first batch is actually observable as "fewer batches ran", not just "one
+    big batch ran or didn't".
     """
+    monkeypatch.setattr("app.tasks.jobs._EMBED_BATCH_SIZE", 3)
     module = await _reach_embedding_state(demo_store_path, db_session, monkeypatch)
 
-    call_count = 0
+    batch_count = 0
 
-    async def _exceeded_after_first_call(session):
-        return call_count >= 1
+    async def _exceeded_after_first_batch(session):
+        return batch_count >= 1
 
     call_log: list[str] = []
-    real_fake_embed = _fake_embed_text(call_log)
+    real_fake_embed = _fake_embed_texts_batch(call_log)
 
-    async def _counting_embed_text(text: str, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        return await real_fake_embed(text, **kwargs)
+    async def _counting_embed_texts_batch(texts: list[str], **kwargs):
+        nonlocal batch_count
+        batch_count += 1
+        return await real_fake_embed(texts, **kwargs)
 
-    monkeypatch.setattr("app.tasks.jobs.is_budget_exceeded", _exceeded_after_first_call)
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _counting_embed_text)
+    monkeypatch.setattr("app.tasks.jobs.is_budget_exceeded", _exceeded_after_first_batch)
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _counting_embed_texts_batch)
 
     await embed_chunks(None, module.id, module.current_hash)
 
-    assert len(call_log) == 1  # stopped after the first call, not all 10 misses
+    assert len(call_log) == 3  # stopped after the first batch of 3, not all 10 misses
     await db_session.refresh(module)
     assert module.state == "paused_budget"
 
@@ -232,14 +238,14 @@ async def test_embed_chunks_failure_does_not_clobber_a_newer_scan_generations_st
     module = await _reach_embedding_state(demo_store_path, db_session, monkeypatch)
     original_hash = module.current_hash
 
-    async def _race_then_fail(text, **kwargs):
+    async def _race_then_fail(texts, **kwargs):
         await db_session.execute(
             update(Module).where(Module.id == module.id).values(current_hash="newer-generation-hash", state="up_to_date")
         )
         await db_session.commit()
         raise RuntimeError("simulated embedding failure in the stale job")
 
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _race_then_fail)
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _race_then_fail)
 
     with pytest.raises(RuntimeError):
         await embed_chunks(None, module.id, original_hash)

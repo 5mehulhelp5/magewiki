@@ -23,7 +23,7 @@ from app.evaluation.runner import (
 )
 from app.models import Chunk, Module
 from tests.conftest import fake_summarize_file, scan_demo_store
-from tests.tasks.test_jobs_embed_chunks import _fake_doc, _fake_embed_text
+from tests.tasks.test_jobs_embed_chunks import _fake_doc, _fake_embed_texts_batch
 
 
 @pytest.mark.asyncio
@@ -49,7 +49,7 @@ async def test_seed_corpus_drives_the_real_pipeline_to_up_to_date(demo_store_pat
         )
 
     monkeypatch.setattr("app.tasks.jobs.synthesize_module_doc", _fake_synthesize)
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _fake_embed_text([]))
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _fake_embed_texts_batch([]))
 
     module = await seed_corpus(db_session, str(demo_store_path))
 
@@ -86,7 +86,7 @@ async def test_seed_corpus_wipes_any_previously_seeded_module_first(
         )
 
     monkeypatch.setattr("app.tasks.jobs.synthesize_module_doc", _fake_synthesize)
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _fake_embed_text([]))
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _fake_embed_texts_batch([]))
 
     await seed_corpus(db_session, str(demo_module_path))
 

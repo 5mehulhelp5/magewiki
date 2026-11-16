@@ -45,6 +45,67 @@ async def embed_text(
     return vector, result
 
 
+async def embed_texts_batch(
+    texts: list[str], *, model: str, api_key: str | None, api_base: str | None = None
+) -> list[tuple[list[float], LlmCallResult]]:
+    """Embeds several texts in one real API call via litellm.aembedding's own
+    multi-input support (`input=[...]`), instead of one call per text -- the
+    embed_chunks cache-miss loop this feeds previously made one HTTP round trip
+    per chunk even though the embeddings API already accepts a batch in one call.
+
+    The API bills (and reports usage/cost for) the whole batch as a single call,
+    with no per-item breakdown -- tokens_in and cost_usd are split across the
+    returned LlmCallResults proportionally by each text's own character length,
+    so every item gets a plausible individual number for its own AnalysisCache
+    row, while the SUM across the batch still equals the one real, billed total
+    (critical: the monthly budget is a sum over AnalysisCache.cost_usd, so this
+    must not inflate or lose any of the batch's real cost through rounding).
+    """
+    if not texts:
+        return []
+    response = await litellm.aembedding(model=model, api_key=api_key, api_base=api_base, input=texts)
+    # OpenAI's batch embeddings response includes each item's own "index" and
+    # documents returning them in input order already, but sorting by it here
+    # (falling back to response.data's own position if a provider omits it) is
+    # the difference between a silent vector/text mismatch and a clear bug if
+    # that guarantee is ever wrong for some provider litellm proxies to.
+    ordered = sorted(enumerate(response.data), key=lambda pair: pair[1].get("index", pair[0]))
+    vectors = [item["embedding"] for _i, item in ordered]
+
+    total_tokens = response.usage.prompt_tokens
+    total_cost: Decimal | None = None
+    try:
+        raw_cost = litellm.completion_cost(completion_response=response)
+        total_cost = Decimal(str(raw_cost)) if raw_cost else None
+    except Exception:  # noqa: BLE001 - cost computation must never block embedding
+        total_cost = None
+    if not total_cost or total_cost <= 0:
+        total_cost = compute_cost_usd(model, total_tokens, 0)
+
+    LLM_CALLS_TOTAL.labels(model, "embedding").inc()
+    LLM_CALL_COST_USD.labels(model, "embedding").observe(float(total_cost))
+
+    char_counts = [max(len(t), 1) for t in texts]
+    total_chars = sum(char_counts)
+    results: list[tuple[list[float], LlmCallResult]] = []
+    tokens_allocated = 0
+    cost_allocated = Decimal(0)
+    for i, (vector, chars) in enumerate(zip(vectors, char_counts, strict=True)):
+        is_last = i == len(texts) - 1
+        # The last item absorbs the rounding remainder so these always sum to
+        # exactly total_tokens/total_cost, not a rounded-down approximation.
+        tokens_in = total_tokens - tokens_allocated if is_last else round(total_tokens * chars / total_chars)
+        cost = total_cost - cost_allocated if is_last else (total_cost * chars / total_chars).quantize(
+            Decimal("0.00000001")
+        )
+        tokens_allocated += tokens_in
+        cost_allocated += cost
+        results.append(
+            (vector, LlmCallResult(response_json={"embedding": vector}, tokens_in=tokens_in, tokens_out=0, cost_usd=cost))
+        )
+    return results
+
+
 async def embed_query_text(
     query: str,
     *,

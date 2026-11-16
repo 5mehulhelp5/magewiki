@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from app.analyzer.budget import BudgetExceededError
-from app.analyzer.embeddings import embed_query_text, embed_text, hash_text
+from app.analyzer.embeddings import embed_query_text, embed_text, embed_texts_batch, hash_text
 from app.analyzer.prompts import EMBEDDING_PROMPT_VERSION
 from app.config import settings
 from app.models import AnalysisCache
@@ -100,6 +100,86 @@ async def test_embed_query_text_returns_only_the_vector(monkeypatch):
     vector = await embed_query_text("a query", model="m", api_key="k", api_base="http://localhost:11434")
 
     assert vector == [0.5, 0.6]
+
+
+def _fake_batch_response(vectors: list[list[float]], prompt_tokens: int, indices: list[int] | None = None):
+    data = [{"embedding": v, "index": i} for v, i in zip(vectors, indices or range(len(vectors)), strict=True)]
+    return SimpleNamespace(data=data, usage=SimpleNamespace(prompt_tokens=prompt_tokens))
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_batch_returns_an_empty_list_without_making_a_call(monkeypatch):
+    async def fake_aembedding(**kwargs):
+        pytest.fail("must not call the embeddings API for an empty batch")
+
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.aembedding", fake_aembedding)
+
+    assert await embed_texts_batch([], model="m", api_key="k") == []
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_batch_makes_exactly_one_call_for_several_texts(monkeypatch):
+    calls = []
+
+    async def fake_aembedding(**kwargs):
+        calls.append(kwargs)
+        return _fake_batch_response([[0.1], [0.2], [0.3]], prompt_tokens=30)
+
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.aembedding", fake_aembedding)
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.completion_cost", lambda **k: 0.003)
+
+    results = await embed_texts_batch(["aa", "bb", "cc"], model="m", api_key="k")
+
+    assert len(calls) == 1
+    assert calls[0]["input"] == ["aa", "bb", "cc"]
+    assert [v for v, _r in results] == [[0.1], [0.2], [0.3]]
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_batch_splits_tokens_and_cost_so_they_sum_to_the_real_total(monkeypatch):
+    """The embeddings API bills (and reports usage for) the whole batch as one
+    call, with no per-item breakdown. Each returned LlmCallResult gets its own
+    plausible share, but critically the SUM across the batch must equal the
+    one real, billed total exactly -- the monthly budget is a sum over every
+    AnalysisCache.cost_usd row, so under- or over-allocating by rounding would
+    silently corrupt that ledger.
+    """
+
+    async def fake_aembedding(**kwargs):
+        return _fake_batch_response([[0.1], [0.2], [0.3]], prompt_tokens=100)
+
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.aembedding", fake_aembedding)
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.completion_cost", lambda **k: 0.0033333)
+
+    # Deliberately uneven lengths so an equal-split-by-count would visibly
+    # differ from the real, length-proportional allocation this asserts.
+    texts = ["a", "bb", "ccccccc"]
+    results = await embed_texts_batch(texts, model="m", api_key="k")
+
+    assert sum(r.tokens_in for _v, r in results) == 100
+    assert sum(r.cost_usd for _v, r in results) == Decimal("0.0033333")
+    # The longest text gets the largest share of both.
+    assert results[2][1].tokens_in > results[1][1].tokens_in > results[0][1].tokens_in
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_batch_reorders_by_the_responses_own_index_field(monkeypatch):
+    """OpenAI documents returning batch embeddings in input order already, but
+    each item also carries its own "index" -- sorting by it (rather than
+    trusting response.data's own position) is what actually guarantees the
+    returned vectors line up with the input texts if that ordering guarantee
+    is ever wrong for some provider litellm proxies to."""
+
+    async def fake_aembedding(**kwargs):
+        # Response data deliberately out of order: index 2 first, then 0, then 1.
+        return _fake_batch_response([[2.0], [0.0], [1.0]], prompt_tokens=30, indices=[2, 0, 1])
+
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.aembedding", fake_aembedding)
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.completion_cost", lambda **k: 0.003)
+
+    results = await embed_texts_batch(["first", "second", "third"], model="m", api_key="k")
+
+    assert [v for v, _r in results] == [[0.0], [1.0], [2.0]]
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ from app.models import Chunk, PhpClass, PhpClassMethod
 from app.scanner.orchestrator import ScanAlreadyInProgressError
 from app.tasks import jobs as jobs_module
 from app.tasks.jobs import embed_chunks, refresh_magento_release_cache, scan_repository_job
-from tests.tasks.test_jobs_embed_chunks import _fake_embed_text, _reach_embedding_state
+from tests.tasks.test_jobs_embed_chunks import _fake_embed_texts_batch, _reach_embedding_state
 
 
 @pytest.mark.asyncio
@@ -37,7 +37,7 @@ async def test_embed_chunks_falls_back_to_empty_source_when_a_method_file_is_unr
     await db_session.commit()
 
     call_log: list[str] = []
-    monkeypatch.setattr("app.tasks.jobs.embed_text", _fake_embed_text(call_log))
+    monkeypatch.setattr("app.tasks.jobs.embed_texts_batch", _fake_embed_texts_batch(call_log))
 
     await embed_chunks(None, module.id, module.current_hash)
 
