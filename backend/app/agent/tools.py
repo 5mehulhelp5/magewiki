@@ -29,6 +29,17 @@ from app.search.similar_modules import find_similar_modules as _find_similar_mod
 # and then "reranking" them would just reshuffle an already-narrow list.
 _RERANK_CANDIDATE_POOL = 20
 
+# find_by_event/find_by_class match on a substring (ILIKE %...%) of an
+# identifier the model chose, not an exact one -- a generic word ("save",
+# "Address") can match fleet-wide across hundreds of rows. Unlike
+# search_modules/list_modules (both already capped), these two had no LIMIT
+# at all: the full match set got JSON-serialized into the tool result and then
+# stayed in `history` for every remaining round of this chat turn (see
+# app/agent/loop.py), inflating every subsequent LLM call's prompt size and
+# cost. Capped, not paginated -- these are "who/what" lookups the model is
+# expected to narrow by rephrasing, not a browse-all-results UI.
+_IDENTIFIER_MATCH_LIMIT = 50
+
 
 async def search_modules(session: AsyncSession, query: str, limit: int = 10) -> dict:
     # Two independent, independently-costed optimizations over the same base
@@ -240,6 +251,8 @@ async def find_by_event(session: AsyncSession, event_name: str) -> dict:
             select(EventObserver, Module.name)
             .join(Module, Module.id == EventObserver.module_id)
             .where(EventObserver.event_name.ilike(like))
+            .order_by(EventObserver.event_name)
+            .limit(_IDENTIFIER_MATCH_LIMIT)
         )
     ).all()
 
@@ -266,6 +279,8 @@ async def find_by_class(session: AsyncSession, identifier: str) -> dict:
             select(PhpClass, Module.name)
             .join(Module, Module.id == PhpClass.module_id)
             .where(PhpClass.fqcn.ilike(like) | PhpClass.class_name.ilike(like))
+            .order_by(PhpClass.fqcn)
+            .limit(_IDENTIFIER_MATCH_LIMIT)
         )
     ).all()
     overridden_by = (
@@ -273,6 +288,8 @@ async def find_by_class(session: AsyncSession, identifier: str) -> dict:
             select(DiPreference, Module.name)
             .join(Module, Module.id == DiPreference.module_id)
             .where(DiPreference.for_type.ilike(like))
+            .order_by(DiPreference.for_type)
+            .limit(_IDENTIFIER_MATCH_LIMIT)
         )
     ).all()
     plugins_targeting_it = (
@@ -280,6 +297,8 @@ async def find_by_class(session: AsyncSession, identifier: str) -> dict:
             select(DiPlugin, Module.name)
             .join(Module, Module.id == DiPlugin.module_id)
             .where(DiPlugin.intercepted_type.ilike(like))
+            .order_by(DiPlugin.intercepted_type)
+            .limit(_IDENTIFIER_MATCH_LIMIT)
         )
     ).all()
     is_a_plugin_for = (
@@ -287,6 +306,8 @@ async def find_by_class(session: AsyncSession, identifier: str) -> dict:
             select(DiPlugin, Module.name)
             .join(Module, Module.id == DiPlugin.module_id)
             .where(DiPlugin.plugin_class.ilike(like))
+            .order_by(DiPlugin.plugin_class)
+            .limit(_IDENTIFIER_MATCH_LIMIT)
         )
     ).all()
 
@@ -577,7 +598,10 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "find_by_event",
-            "description": "Find which observers listen to a given Magento event name.",
+            "description": (
+                "Find which observers listen to a given Magento event name. Matches are capped "
+                f"at {_IDENTIFIER_MATCH_LIMIT} -- use a more specific event_name if you need a different match."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"event_name": {"type": "string"}},
@@ -591,7 +615,8 @@ TOOL_SCHEMAS = [
             "name": "find_by_class",
             "description": (
                 "Find where a class/interface is defined, what overrides it (di.xml preference), what plugins "
-                "intercept it, and what it is itself a plugin for. Accepts a partial FQCN or class name."
+                "intercept it, and what it is itself a plugin for. Accepts a partial FQCN or class name. Each "
+                f"result list is capped at {_IDENTIFIER_MATCH_LIMIT} -- use a more specific identifier if needed."
             ),
             "parameters": {
                 "type": "object",

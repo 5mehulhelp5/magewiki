@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import delete, update
 
 from app.agent.tools import (
+    _IDENTIFIER_MATCH_LIMIT,
     find_by_class,
     find_by_event,
     find_duplicate_module_pairs,
@@ -24,10 +25,12 @@ from app.analyzer.prompts import MODULE_SYNTHESIS_PROMPT_VERSION
 from app.models import (
     AnalysisCache,
     Chunk,
+    EventObserver,
     Module,
     ModuleDocument,
     ModuleHistorySnapshot,
     ModuleQualityFinding,
+    PhpClass,
 )
 from tests.conftest import scan_demo_store
 
@@ -505,6 +508,59 @@ async def test_find_by_class_covers_preference_and_plugin(demo_store_path: Path,
 
     defined_result = await find_by_class(db_session, identifier="SampleCheckoutPlugin")
     assert any(c["module_id"] == module.id for c in defined_result["defined_in"])
+
+
+@pytest.mark.asyncio
+async def test_find_by_event_caps_a_broad_match_instead_of_returning_everything(db_session):
+    """Regression test: event_name is matched with an unanchored ILIKE
+    %...%, so a generic substring like "save" can match fleet-wide. Without a
+    LIMIT, the full match set gets JSON-serialized into the tool result and
+    stays in the chat history for the rest of that turn, inflating every
+    later LLM call's prompt size and cost (see app/agent/loop.py)."""
+    suffix = uuid.uuid4().hex[:8]
+    module = await _make_bare_module(db_session, suffix)
+    for i in range(_IDENTIFIER_MATCH_LIMIT + 10):
+        db_session.add(
+            EventObserver(
+                module_id=module.id,
+                event_name=f"save_event_{suffix}_{i:03d}",
+                observer_name=f"observer_{i}",
+                observer_class=f"Vendor\\Module\\Observer\\O{i}",
+                disabled=False,
+            )
+        )
+    await db_session.commit()
+
+    result = await find_by_event(db_session, event_name=f"save_event_{suffix}")
+
+    assert len(result["results"]) == _IDENTIFIER_MATCH_LIMIT
+
+    await db_session.execute(delete(Module).where(Module.id == module.id))
+    await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_find_by_class_caps_a_broad_match_instead_of_returning_everything(db_session):
+    suffix = uuid.uuid4().hex[:8]
+    module = await _make_bare_module(db_session, suffix)
+    for i in range(_IDENTIFIER_MATCH_LIMIT + 10):
+        db_session.add(
+            PhpClass(
+                module_id=module.id,
+                fqcn=f"Vendor\\Module\\{suffix}\\Address{i:03d}",
+                class_name=f"Address{i:03d}",
+                kind="class",
+                file_path=f"Model/Address{i:03d}.php",
+            )
+        )
+    await db_session.commit()
+
+    result = await find_by_class(db_session, identifier=f"{suffix}\\Address")
+
+    assert len(result["defined_in"]) == _IDENTIFIER_MATCH_LIMIT
+
+    await db_session.execute(delete(Module).where(Module.id == module.id))
+    await db_session.commit()
 
 
 @pytest.mark.asyncio
