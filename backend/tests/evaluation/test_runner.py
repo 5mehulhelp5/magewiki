@@ -386,7 +386,7 @@ async def test_run_retrieval_eval_scores_vector_keyword_and_hybrid_for_a_real_ma
 
 
 def test_eval_report_to_dict_and_markdown_table():
-    metrics = {mode: {f"recall@{k}": 1.0 for k in (1, 3, 5, 10)} | {"mrr": 1.0} for mode in ("vector", "keyword", "hybrid")}
+    metrics = {mode: {f"hit_rate@{k}": 1.0 for k in (1, 3, 5, 10)} | {"mrr": 1.0} for mode in ("vector", "keyword", "hybrid")}
     report = EvalReport(
         generated_at="2026-01-01T00:00:00+00:00",
         corpus="Vendor_Module",
@@ -411,7 +411,7 @@ def test_eval_report_to_dict_and_markdown_table():
 def test_eval_report_to_markdown_table_includes_faithfulness_when_present():
     from app.evaluation.runner import FaithfulnessResult
 
-    metrics = {mode: {f"recall@{k}": 1.0 for k in (1, 3, 5, 10)} | {"mrr": 1.0} for mode in ("vector", "keyword", "hybrid")}
+    metrics = {mode: {f"hit_rate@{k}": 1.0 for k in (1, 3, 5, 10)} | {"mrr": 1.0} for mode in ("vector", "keyword", "hybrid")}
     report = EvalReport(
         generated_at="2026-01-01T00:00:00+00:00",
         corpus="Vendor_Module",

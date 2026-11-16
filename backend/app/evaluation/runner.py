@@ -2,7 +2,7 @@
 production scan -> analyze -> synthesize -> embed pipeline against the
 Ordo_Automation fixture, then scores retrieval/enumeration/negative questions
 against it. See backend/app/evaluation/dataset.py for the question set and
-backend/app/evaluation/metrics.py for recall@k/MRR.
+backend/app/evaluation/metrics.py for hit_rate@k/MRR.
 """
 
 import json

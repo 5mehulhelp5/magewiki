@@ -38,9 +38,9 @@ def test_reciprocal_rank_raises_on_empty_relevant_ids():
 
 
 def test_aggregate_exact_values_over_three_questions():
-    # q1: hit at rank 1 -> recall@1/3 true, rr=1.0
-    # q2: hit at rank 3 -> recall@1 false, recall@3 true, rr=1/3
-    # q3: miss entirely -> recall@1/3 false, rr=0.0
+    # q1: hit at rank 1 -> hit_rate@1/3 true, rr=1.0
+    # q2: hit at rank 3 -> hit_rate@1 false, hit_rate@3 true, rr=1/3
+    # q3: miss entirely -> hit_rate@1/3 false, rr=0.0
     per_question = [
         ([1, 2, 3], {1}),
         ([2, 5, 3], {3}),
@@ -49,8 +49,8 @@ def test_aggregate_exact_values_over_three_questions():
 
     result = aggregate(per_question, ks=(1, 3))
 
-    assert result["recall@1"] == pytest.approx(1 / 3)
-    assert result["recall@3"] == pytest.approx(2 / 3)
+    assert result["hit_rate@1"] == pytest.approx(1 / 3)
+    assert result["hit_rate@3"] == pytest.approx(2 / 3)
     assert result["mrr"] == pytest.approx((1.0 + 1 / 3 + 0.0) / 3)
 
 

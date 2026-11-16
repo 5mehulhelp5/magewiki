@@ -129,8 +129,8 @@ MVP = Phases 0–5. Each phase is done separately: first a plan for approval, th
 | 4 | Embeddings and hybrid retriever (vector + FTS + trigram, RRF) | A query returns the right files |
 | 5 | Agent with tools, SSE chat, citations, pm/dev modes | Clickable sources in the UI |
 | 6 | Cron, HMAC webhook, BYOK, Ollama, dependency graph | Nightly scan runs unattended |
-| 7 | Evaluation suite (recall@k, MRR, negative/enumeration questions), README, GIF | Results in the README, vector vs. FTS vs. hybrid chart |
-| 7b | CI/CD: GitHub Actions (lint, tests, Docker build, RAG eval on PR) | recall@k posted as a PR comment |
+| 7 | Evaluation suite (hit_rate@k, MRR, negative/enumeration questions), README, GIF | Results in the README, vector vs. FTS vs. hybrid chart |
+| 7b | CI/CD: GitHub Actions (lint, tests, Docker build, RAG eval on PR) | hit_rate@k posted as a PR comment |
 | 8 | Kubernetes: Helm or Kustomize, scan CronJob, tested on `kind` | Full stack runs on a local cluster |
 | 9 | Parser-only quality checks (composer completeness, README presence, `@deprecated`, hardcoded secrets, test presence) + badge/KPI-ring UI foundation | New checks show up as badges on the module list and a stats page with KPI rings |
 | 10 | Dependency intelligence: CVE/security-advisory check + abandoned/outdated check | A module with a known-vulnerable dependency shows a blocking CVE badge citing the advisory |

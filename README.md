@@ -316,7 +316,7 @@ network-isolated container.
 - [x] **Phase 4** — Embeddings and hybrid retriever (vector + FTS + trigram, RRF)
 - [x] **Phase 5** — Agent with tools, SSE chat, citations, pm/dev modes
 - [x] **Phase 6** — Cron, HMAC webhook, BYOK in the UI, Ollama, dependency graph
-- [x] **Phase 7** — Evaluation suite (recall@k, MRR, negative/enumeration questions)
+- [x] **Phase 7** — Evaluation suite (hit_rate@k, MRR, negative/enumeration questions)
 - [x] **Phase 7b** — CI/CD (GitHub Actions): lint, tests, Docker build, and the PR-comment RAG eval all verified green
 - [x] **Phase 8** — Kubernetes: Kustomize manifests, scan CronJob, verified end-to-end on a local `kind` cluster
 - [x] **Phase 9** — Parser-only quality checks (composer completeness, `@deprecated`, hardcoded secrets, test presence) + badge/KPI-ring UI foundation
@@ -344,10 +344,11 @@ Full detail (done-criteria, data model, RAG design, and the decision recorded be
 
 Retrieval quality measured against a real third-party module (`Ordo_Automation`,
 B2B/B2C marketing automation, 840 files), with a real Anthropic synthesis pass and
-real local Ollama embeddings (`bge-m3`) — not a synthetic fixture. recall@k = "at
-least one correct chunk appeared in the top k results"; MRR = mean reciprocal rank of
-the first correct hit. See `backend/app/evaluation/` for the question set, metrics,
-and runner.
+real local Ollama embeddings (`bge-m3`) — not a synthetic fixture. hit_rate@k = "at
+least one correct chunk appeared in the top k results" (not literal set recall —
+undercounts the miss rate on a question with more than one correct chunk, which is
+why it's named hit_rate@k and not recall@k); MRR = mean reciprocal rank of the first
+correct hit. See `backend/app/evaluation/` for the question set, metrics, and runner.
 
 The suite is built and wired into CI (`7b`'s PR-comment check); the numbers below are
 from a real run against this fixture. Regenerate them with:
@@ -366,7 +367,7 @@ embedding dimension" decision note) — one honest caveat remains: these numbers
 `bge-m3`, not OpenAI's embedding model, so they aren't directly comparable to a run
 with `EMBEDDING_MODEL` left at its OpenAI default.
 
-| Mode | recall@1 | recall@3 | recall@5 | recall@10 | MRR |
+| Mode | hit_rate@1 | hit_rate@3 | hit_rate@5 | hit_rate@10 | MRR |
 |---|---|---|---|---|---|
 | Vector-only | 0.50 | 0.80 | 0.90 | 0.90 | 0.68 |
 | FTS-only | 0.10 | 0.20 | 0.20 | 0.20 | 0.13 |

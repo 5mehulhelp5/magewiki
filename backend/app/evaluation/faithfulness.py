@@ -1,6 +1,6 @@
 """LLM-as-judge faithfulness check: does the agent's own answer actually say
 only things its cited sources support? A separate axis from retrieval
-quality (recall@k/MRR) -- the agent can retrieve the right chunks and still
+quality (hit_rate@k/MRR) -- the agent can retrieve the right chunks and still
 overstate or misread them in its final answer. See CLAUDE.md's "LLM-judge
 faithfulness eval" decision note.
 

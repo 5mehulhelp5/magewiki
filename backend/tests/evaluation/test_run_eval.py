@@ -42,8 +42,8 @@ async def test_main_seeds_scores_writes_and_prints_the_report(monkeypatch, tmp_p
         return _FakeModule()
 
     async def fake_run_retrieval_eval(session, questions, module):
-        empty_mode = {f"recall@{k}": 0.0 for k in (1, 3, 5, 10)} | {"mrr": 0.0}
-        return {"vector": empty_mode, "keyword": empty_mode, "hybrid": {**empty_mode, "recall@1": 1.0}}
+        empty_mode = {f"hit_rate@{k}": 0.0 for k in (1, 3, 5, 10)} | {"mrr": 0.0}
+        return {"vector": empty_mode, "keyword": empty_mode, "hybrid": {**empty_mode, "hit_rate@1": 1.0}}
 
     async def fake_run_enumeration_eval(session, questions, module):
         return [QuestionResult(id="e1", query="q", passed=True, detail="")]

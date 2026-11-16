@@ -30,7 +30,7 @@ async def test_real_eval_run_against_ordo_automation(db_session):
     module = await seed_corpus(db_session, repo_root)
 
     retrieval_metrics = await run_retrieval_eval(db_session, RETRIEVAL_QUESTIONS, module)
-    assert retrieval_metrics["hybrid"]["recall@5"] >= 0.7
+    assert retrieval_metrics["hybrid"]["hit_rate@5"] >= 0.7
 
     enumeration_results = await run_enumeration_eval(db_session, ENUMERATION_QUESTIONS, module)
     failed_enum = [r for r in enumeration_results if not r.passed]

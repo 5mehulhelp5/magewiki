@@ -113,10 +113,10 @@ async def test_hybrid_fusion_beats_either_signal_alone(db_session, monkeypatch):
     keyword_metrics = aggregate([(keyword_ranked, relevant)], ks=(1,))
     hybrid_metrics = aggregate([(hybrid_ranked, relevant)], ks=(1,))
 
-    assert vector_metrics["recall@1"] == 0.0
-    assert keyword_metrics["recall@1"] == 0.0
-    assert hybrid_metrics["recall@1"] == 1.0
-    assert hybrid_metrics["recall@1"] >= max(vector_metrics["recall@1"], keyword_metrics["recall@1"])
+    assert vector_metrics["hit_rate@1"] == 0.0
+    assert keyword_metrics["hit_rate@1"] == 0.0
+    assert hybrid_metrics["hit_rate@1"] == 1.0
+    assert hybrid_metrics["hit_rate@1"] >= max(vector_metrics["hit_rate@1"], keyword_metrics["hit_rate@1"])
 
     await db_session.execute(delete(Module).where(Module.id == module.id))
     await db_session.commit()
