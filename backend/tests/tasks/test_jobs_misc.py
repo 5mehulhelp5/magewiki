@@ -1,63 +1,13 @@
-import uuid
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select, update
 
-from app.analyzer.client import LlmCallResult
-from app.models import AnalysisCache, Chunk, PhpClass, PhpClassMethod
+from app.models import Chunk, PhpClass, PhpClassMethod
 from app.scanner.orchestrator import ScanAlreadyInProgressError
 from app.tasks import jobs as jobs_module
-from app.tasks.jobs import (
-    _get_or_create_cache_entry,
-    embed_chunks,
-    refresh_magento_release_cache,
-    scan_repository_job,
-)
+from app.tasks.jobs import embed_chunks, refresh_magento_release_cache, scan_repository_job
 from tests.tasks.test_jobs_embed_chunks import _fake_embed_text, _reach_embedding_state
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_cache_entry_inserts_a_new_row(db_session):
-    content_hash = f"jobs-misc-{uuid.uuid4().hex[:8]}"
-    result = LlmCallResult(response_json={"x": 1}, tokens_in=10, tokens_out=5, cost_usd=Decimal("0.001"))
-
-    cache_id = await _get_or_create_cache_entry(db_session, content_hash, "m", "v1", "file_summary", result)
-    await db_session.commit()
-
-    row = await db_session.get(AnalysisCache, cache_id)
-    assert row is not None
-    assert row.content_hash == content_hash
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_cache_entry_returns_the_existing_id_on_conflict(db_session):
-    """Regression/race-condition path: on_conflict_do_nothing() means a concurrent
-    job that already inserted the identical (content_hash, model, prompt_version,
-    kind) row wins -- this call must find and return THAT row's id, not silently
-    produce no id or a duplicate.
-    """
-    content_hash = f"jobs-misc-race-{uuid.uuid4().hex[:8]}"
-    first_result = LlmCallResult(response_json={"x": 1}, tokens_in=10, tokens_out=5, cost_usd=Decimal("0.001"))
-    existing_id = await _get_or_create_cache_entry(db_session, content_hash, "m", "v1", "file_summary", first_result)
-    await db_session.commit()
-
-    second_result = LlmCallResult(response_json={"x": 2}, tokens_in=99, tokens_out=99, cost_usd=Decimal(9))
-    returned_id = await _get_or_create_cache_entry(db_session, content_hash, "m", "v1", "file_summary", second_result)
-
-    assert returned_id == existing_id
-
-    rows = (
-        await db_session.scalars(
-            select(AnalysisCache).where(
-                AnalysisCache.content_hash == content_hash, AnalysisCache.model == "m",
-                AnalysisCache.prompt_version == "v1", AnalysisCache.kind == "file_summary",
-            )
-        )
-    ).all()
-    assert len(rows) == 1
-    assert rows[0].tokens_in == 10  # the first (winning) insert's data, not the second's
 
 
 @pytest.mark.asyncio

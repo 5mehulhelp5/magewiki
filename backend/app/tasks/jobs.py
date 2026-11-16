@@ -8,6 +8,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.analyzer.budget import is_budget_exceeded, pause_module_for_budget
+from app.analyzer.cache import get_or_create_cache_entry, lookup_cache
 from app.analyzer.client import summarize_file, synthesize_module_doc
 from app.analyzer.embeddings import (
     build_file_chunk_text,
@@ -50,50 +51,6 @@ from app.scanner.orchestrator import ScanAlreadyInProgressError, scan_repository
 from app.tasks.queue import get_arq_pool
 
 logger = logging.getLogger(__name__)
-
-
-async def _get_or_create_cache_entry(
-    session, content_hash: str, model: str, prompt_version: str, kind: str, result
-) -> int:
-    insert_stmt = (
-        pg_insert(AnalysisCache)
-        .values(
-            content_hash=content_hash,
-            model=model,
-            prompt_version=prompt_version,
-            kind=kind,
-            response=result.response_json,
-            tokens_in=result.tokens_in,
-            tokens_out=result.tokens_out,
-            cost_usd=result.cost_usd,
-        )
-        .on_conflict_do_nothing(index_elements=["content_hash", "model", "prompt_version", "kind"])
-        .returning(AnalysisCache.id)
-    )
-    inserted = (await session.execute(insert_stmt)).first()
-    if inserted is not None:
-        return inserted.id
-
-    existing_id = await session.scalar(
-        select(AnalysisCache.id).where(
-            AnalysisCache.content_hash == content_hash,
-            AnalysisCache.model == model,
-            AnalysisCache.prompt_version == prompt_version,
-            AnalysisCache.kind == kind,
-        )
-    )
-    return existing_id
-
-
-async def _lookup_cache(session, content_hash: str, model: str, prompt_version: str, kind: str) -> AnalysisCache | None:
-    return await session.scalar(
-        select(AnalysisCache).where(
-            AnalysisCache.content_hash == content_hash,
-            AnalysisCache.model == model,
-            AnalysisCache.prompt_version == prompt_version,
-            AnalysisCache.kind == kind,
-        )
-    )
 
 
 @asynccontextmanager
@@ -142,7 +99,7 @@ async def analyze_file(
                 return  # stale job from a superseded scan generation
 
             llm_config = await resolve_llm_config(session)
-            cached = await _lookup_cache(
+            cached = await lookup_cache(
                 session, content_hash, llm_config.model, FILE_SUMMARY_PROMPT_VERSION, "file_summary"
             )
 
@@ -161,7 +118,7 @@ async def analyze_file(
                     api_base=llm_config.api_base,
                 )
 
-                cache_id = await _get_or_create_cache_entry(
+                cache_id = await get_or_create_cache_entry(
                     session, content_hash, llm_config.model, FILE_SUMMARY_PROMPT_VERSION, "file_summary", result
                 )
             else:
@@ -226,7 +183,7 @@ async def synthesize_module(ctx: dict | None, module_id: int, module_current_has
                 return  # stale job from a superseded scan generation
 
             llm_config = await resolve_synthesis_llm_config(session)
-            cached = await _lookup_cache(
+            cached = await lookup_cache(
                 session, module_current_hash, llm_config.model, MODULE_SYNTHESIS_PROMPT_VERSION, "module_synthesis"
             )
 
@@ -254,7 +211,7 @@ async def synthesize_module(ctx: dict | None, module_id: int, module_current_has
                 response_json = doc.model_dump(mode="json")
                 result.response_json = response_json
 
-                cache_id = await _get_or_create_cache_entry(
+                cache_id = await get_or_create_cache_entry(
                     session,
                     module_current_hash,
                     llm_config.model,
@@ -389,7 +346,7 @@ async def embed_chunks(ctx: dict | None, module_id: int, module_current_hash: st
                     vector, result = await embed_text(
                         txt, model=embed_config.model, api_key=embed_config.api_key, api_base=embed_config.api_base
                     )
-                    await _get_or_create_cache_entry(
+                    await get_or_create_cache_entry(
                         session, h, embed_config.model, EMBEDDING_PROMPT_VERSION, "embedding", result
                     )
                     embedding_by_hash[h] = vector

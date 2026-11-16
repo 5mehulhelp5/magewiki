@@ -1,9 +1,15 @@
+import uuid
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
+from app.analyzer.budget import BudgetExceededError
 from app.analyzer.embeddings import embed_query_text, embed_text, hash_text
+from app.analyzer.prompts import EMBEDDING_PROMPT_VERSION
+from app.config import settings
+from app.models import AnalysisCache
 from app.observability import LLM_CALL_COST_USD, LLM_CALLS_TOTAL
 
 
@@ -94,3 +100,69 @@ async def test_embed_query_text_returns_only_the_vector(monkeypatch):
     vector = await embed_query_text("a query", model="m", api_key="k", api_base="http://localhost:11434")
 
     assert vector == [0.5, 0.6]
+
+
+@pytest.mark.asyncio
+async def test_embed_query_text_with_a_session_records_cost_to_analysis_cache(db_session, monkeypatch):
+    """Closes the gap the review found: every live caller of embed_query_text now
+    passes its session, so a real query-embedding call is no longer invisible to
+    the monthly budget ledger (AnalysisCache is the only table is_budget_exceeded
+    reads)."""
+    model = f"openai/text-embedding-3-small-{uuid.uuid4().hex[:8]}"  # unique per test, avoids cross-test cache hits
+    query = f"query text {uuid.uuid4().hex[:8]}"
+
+    async def fake_aembedding(**kwargs):
+        return _fake_response([0.7, 0.8])
+
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.aembedding", fake_aembedding)
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.completion_cost", lambda **k: 0.001)
+
+    vector = await embed_query_text(query, model=model, api_key="k", session=db_session)
+
+    assert vector == [0.7, 0.8]
+    row = await db_session.scalar(
+        select(AnalysisCache).where(
+            AnalysisCache.content_hash == hash_text(query),
+            AnalysisCache.model == model,
+            AnalysisCache.prompt_version == EMBEDDING_PROMPT_VERSION,
+            AnalysisCache.kind == "embedding",
+        )
+    )
+    assert row is not None
+    assert row.cost_usd == Decimal("0.001")
+
+
+@pytest.mark.asyncio
+async def test_embed_query_text_with_a_session_reuses_a_cached_embedding_at_no_extra_cost(db_session, monkeypatch):
+    model = f"openai/text-embedding-3-small-{uuid.uuid4().hex[:8]}"
+    query = f"repeated query {uuid.uuid4().hex[:8]}"
+    call_count = 0
+
+    async def fake_aembedding(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _fake_response([0.1, 0.1])
+
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.aembedding", fake_aembedding)
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.completion_cost", lambda **k: 0.001)
+
+    first = await embed_query_text(query, model=model, api_key="k", session=db_session)
+    second = await embed_query_text(query, model=model, api_key="k", session=db_session)
+
+    assert first == second == [0.1, 0.1]
+    assert call_count == 1  # second call was a cache hit, no new embedding call
+
+
+@pytest.mark.asyncio
+async def test_embed_query_text_with_a_session_raises_once_budget_is_exceeded(db_session, monkeypatch):
+    model = f"openai/text-embedding-3-small-{uuid.uuid4().hex[:8]}"
+    query = f"over budget query {uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(settings, "llm_monthly_budget_usd", -1.0)  # already exceeded, unconditionally
+
+    async def fake_aembedding(**kwargs):
+        pytest.fail("embed_text must not be called once the budget is already exceeded")
+
+    monkeypatch.setattr("app.analyzer.embeddings.litellm.aembedding", fake_aembedding)
+
+    with pytest.raises(BudgetExceededError):
+        await embed_query_text(query, model=model, api_key="k", session=db_session)

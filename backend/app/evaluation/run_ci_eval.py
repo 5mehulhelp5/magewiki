@@ -83,7 +83,7 @@ async def _run_scenario(session, scenario: CiScenario) -> dict[str, list[int]]:
     expected_vector = _vector_noise_embedding(scenario)
 
     async def _fake_embed(
-        query: str, *, model: str, api_key: str | None, api_base: str | None = None
+        query: str, *, model: str, api_key: str | None, api_base: str | None = None, session=None
     ) -> list[float]:
         return expected_vector
 

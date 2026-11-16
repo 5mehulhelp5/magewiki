@@ -8,6 +8,13 @@ from app.config import settings
 from app.models import AnalysisCache, Module
 
 
+class BudgetExceededError(RuntimeError):
+    """Raised by a call site that needs to make a new, real LLM/embedding call but
+    the monthly budget is already exceeded and there's no module-state machine to
+    fall back on (unlike the worker jobs, which transition to paused_budget
+    instead of raising)."""
+
+
 def _current_utc_month_start() -> datetime:
     now = datetime.now(UTC)
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)

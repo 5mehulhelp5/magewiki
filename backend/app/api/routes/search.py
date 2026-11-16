@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analyzer.budget import BudgetExceededError
 from app.db import get_session
 from app.search.hybrid import hybrid_search
 
@@ -25,7 +26,10 @@ class SearchResultResponse(BaseModel):
 async def search(
     q: str, limit: int = 10, session: AsyncSession = Depends(get_session)
 ) -> list[SearchResultResponse]:
-    results = await hybrid_search(session, q, limit=limit)
+    try:
+        results = await hybrid_search(session, q, limit=limit)
+    except BudgetExceededError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return [
         SearchResultResponse(
             chunk_id=r.chunk_id,

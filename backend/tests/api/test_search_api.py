@@ -5,6 +5,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
+from app.config import settings
 from app.main import app
 from app.models import Chunk, Module
 
@@ -52,3 +53,18 @@ async def test_search_returns_matching_chunks(db_session, monkeypatch):
 
     await db_session.execute(delete(Module).where(Module.id == module.id))
     await db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_search_returns_503_once_the_monthly_budget_is_exceeded(db_session, monkeypatch):
+    """GET /search is intentionally left open for read-only browsing (Phase 24),
+    but it still spends a real query-embedding call on every request — the review
+    finding this test guards: that spend must be capped by the same monthly
+    budget every other LLM call respects, not an unbounded free-for-all."""
+    monkeypatch.setattr(settings, "llm_monthly_budget_usd", -1.0)  # already exceeded, unconditionally
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/search", params={"q": f"irrelevant {uuid.uuid4().hex[:8]}", "limit": 10})
+
+    assert response.status_code == 503

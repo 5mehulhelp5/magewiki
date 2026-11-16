@@ -129,7 +129,11 @@ async def hybrid_search(
 ) -> list[SearchResult]:
     embed_config = await resolve_embedding_config(session)
     query_embedding = await embed_query_text(
-        query_text, model=embed_config.model, api_key=embed_config.api_key, api_base=embed_config.api_base
+        query_text,
+        model=embed_config.model,
+        api_key=embed_config.api_key,
+        api_base=embed_config.api_base,
+        session=session,
     )
     vector_literal = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
