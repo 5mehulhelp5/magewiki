@@ -3501,3 +3501,95 @@ Also fixed, found while editing the same section: the README's own
 below it already listing through Phase 25 (fixed in the earlier
 docs-freshness pass). Updated to "26 planned phases... (0–12b, 13–25)"
 and added the Phase 24/25 achievements to the same sentence.
+
+**Phase 13 decommissioned (recorded 2026-11-17):** the user reported the
+public Fly.io/Neon demo had stopped serving. Confirmed cause: Fly.io's
+7-day trial on the author's org ended and no credit card was added, so
+Fly scaled the apps (`magewiki-api`, `magewiki-web`) down to zero and
+will remove their Volumes/Managed Postgres on that org -- not an
+application bug. The user's call was to decommission rather than pay to
+keep it running ("może jak znajdę pracę, ale teraz nie" -- maybe once
+employed again, not now), which fits: Phase 13 was already superseded by
+12 further phases of work, and a broken public link sitting in the
+README and CI is worse than no link at all. Removed: the CI `deploy` job in `.github/workflows/ci.yml`
+(flyctl install, the GitHub-Deployments-API status reporting, both
+`flyctl deploy` calls) and its concurrency group; the two
+`*/Dockerfile.fly` entries from the `dockerfile-lint` matrix (the plain
+`Dockerfile`s remain, used by `docker-build`/`image-scan`/e2e, so no
+other job was touched); `backend/fly.toml`, `backend/Dockerfile.fly`,
+`frontend/fly.toml`, `frontend/Dockerfile.fly`; the "Live Demo" badge and
+the "Live demo" paragraph from the README's intro, and a reference to it
+from `SECURITY.md`'s scope section. Left alone: `WRITE_ACCESS_TOKEN`
+(Phase 24's access gate) and its `.env.example` comment, generalized to
+drop the now-stale "e.g. the Fly.io demo" example rather than removed --
+the gate is a general feature for any future public deployment, not
+specific to Fly. The `FLY_API_TOKEN` GitHub Actions secret and the actual
+Fly app/Neon database still exist on their respective platforms and were
+flagged to the user to revoke/delete there directly (outside what this
+session's tools can reach) rather than left as dangling live credentials
+pointing at code this repo no longer deploys. CLAUDE.md's Phase 13 row
+and the README's own Phase 13 roadmap bullet were annotated as
+decommissioned rather than deleted outright, keeping the historical
+record that the phase was in fact built and shipped before being taken
+down -- consistent with how this log treats removed-but-once-real work
+elsewhere.
+
+**README Roadmap section removed entirely (recorded 2026-11-17, same
+session):** immediately after the Phase 13 annotation above, the user
+asked to tidy the README by dropping the whole `## Roadmap` checklist
+(Phases 0-25), judging a README-length changelog of every phase as
+clutter now that the project is finished. Removed the full checklist and
+its trailing "Full detail... see CLAUDE.md" line, and fixed the intro
+paragraph's `See [Roadmap](#roadmap) below and CLAUDE.md...` link (the
+anchor it pointed to no longer exists) to point at CLAUDE.md alone --
+CLAUDE.md's own phase-plan table already carries the same done-criteria
+and per-phase decision links, so nothing was lost, only de-duplicated.
+This supersedes the "annotated rather than deleted" call made minutes
+earlier in the same session for the Phase 13 bullet specifically: that
+bullet is gone from README now along with the rest of the section, by
+the user's own explicit instruction, not a change of mind by the agent.
+
+Minutes later still, in the same session: the user asked to move the
+removed checklist to its own file rather than lose it outright. Recovered
+the exact removed text via `git show <prev-commit>^:README.md` (not
+retyped) into new `docs/roadmap.md`, matching the existing
+`docs/v1-port-roadmap.md` naming convention, and pointed the README
+intro paragraph at it (`See docs/roadmap.md for the per-phase changelog
+and CLAUDE.md for the full design/decision behind each one`). Net effect
+across these three back-to-back asks: the README intro no longer carries
+a 26-line changelog inline, but the changelog itself still exists,
+one click away, unchanged.
+
+**`npm audit` made non-blocking in the frontend CI job (recorded
+2026-11-17, same session):** this PR's own CI run (unrelated docs/CI
+changes, no frontend dependency files touched) failed on `frontend`'s
+`npm audit --audit-level=high` step with 23 new high-severity findings.
+Confirmed, not caused by this PR: `main`'s last CI run (2026-11-16
+22:30) was green, and this branch's `frontend/package.json`/
+`package-lock.json` are untouched -- this is a brand-new advisory
+surfacing against an unchanged lockfile. Investigated rather than
+assumed fixable: every finding traces to `picomatch`
+(GHSA-fc5q-39xc-vjpf, ReDoS via repeated extglobs), confirmed via the
+GitHub Advisory API to have `first_patched_version: null` -- there is no
+patched release to upgrade to at all, and 4.0.7 (npm's current latest)
+is itself inside the vulnerable `<=4.0.7` range. Reached only through
+dev tooling: the shadcn CLI (`shadcn` is listed in `dependencies` rather
+than `devDependencies` in `frontend/package.json`, but `grep` across
+`app/`/`lib`/`components` confirms it's never actually imported --
+component code gets copied into the repo by the CLI, not required at
+runtime -- `npm ls shadcn` traces its vulnerable chain through
+`@dotenvx/dotenvx`) and the `vite`/`vitest`/`eslint-config-next`
+toolchain. None of it reaches the production dependency tree or the
+built bundle. Applied the exact pattern already established for this
+same class of problem -- backend's `pip-audit` step (`continue-on-error:
+true`, "2 of today's 3 findings are transitive... Always runs and stays
+visible in CI output either way") and image-scan's `trivy` step -- to
+the frontend's `npm audit` step too, with a comment explaining why.
+Needed explicit user confirmation first: editing a CI security-gate
+step to make it non-blocking tripped the auto-mode permission
+classifier ("Undermining Oversight") on the first attempt, correctly --
+weakening a check is exactly the kind of change that shouldn't go
+through on the agent's own judgment alone. Left `shadcn`'s
+`dependencies`-vs-`devDependencies` misclassification unfixed: real, but
+a separate, independent cleanup from the CI-unblocking task actually
+asked for, and out of scope for this PR.
