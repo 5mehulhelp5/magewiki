@@ -155,67 +155,41 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   dockerfile-lint:
+    # One job looping over all 3 Dockerfiles, not 3 matrix jobs -- hadolint
+    # itself takes seconds per file; most of each old job's wall-clock was
+    # pure runner-startup/checkout overhead, paid 3 times for no reason.
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        dockerfile:
-          - backend/Dockerfile
-          - frontend/Dockerfile
-          - php-analyzer/Dockerfile
     steps:
       - uses: actions/checkout@v7
+      # if: always() on the 2nd/3rd -- a failing step otherwise skips every
+      # step after it, so a backend/Dockerfile finding would silently hide
+      # frontend/php-analyzer findings in the same run. The job's own
+      # conclusion is still failure if any step failed, same gating as
+      # before (fail-fast: false's matrix never skipped sibling jobs either).
       - uses: hadolint/hadolint-action@v3.5.0
         with:
-          dockerfile: ${{ matrix.dockerfile }}
+          dockerfile: backend/Dockerfile
+          config: .hadolint.yaml
+      - if: always()
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: frontend/Dockerfile
+          config: .hadolint.yaml
+      - if: always()
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: php-analyzer/Dockerfile
           config: .hadolint.yaml
 
   docker-build:
+    # One matrix job per image, not 3 sequential builds in a single job --
+    # the 3 builds don't depend on each other, so running them in parallel
+    # shortens this job's own wall-clock to roughly the slowest single
+    # build instead of the sum of all 3, which matters because every
+    # downstream job (image-quality/e2e-smoke/k8s-smoke) waits on this one
+    # finishing first.
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-      # cache-from/cache-to: type=gha -- the three images built here are
-      # rebuilt again, unchanged, by image-scan's own matrix and by
-      # e2e-smoke's `docker compose up --build`, each on its own separate
-      # runner with no shared local Docker daemon state. GitHub's Actions
-      # cache backend (unlike the local Docker build cache) persists across
-      # jobs/runners within the same workflow run, so warming it here lets
-      # both of those later builds hit cache for every layer that hasn't
-      # actually changed, instead of rebuilding from scratch a second and
-      # third time. Scope names match image-scan's own matrix.image values
-      # and e2e-smoke's own three cache-from/-to calls below.
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./backend
-          tags: magewiki-backend-ci
-          load: true
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          tags: magewiki-frontend-ci
-          load: true
-          cache-from: type=gha,scope=frontend
-          cache-to: type=gha,mode=max,scope=frontend
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: php-analyzer/Dockerfile
-          tags: magewiki-php-analyzer-ci
-          load: true
-          cache-from: type=gha,scope=php-analyzer
-          cache-to: type=gha,mode=max,scope=php-analyzer
-
-  image-scan:
-    needs: docker-build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
     strategy:
-      fail-fast: false
       matrix:
         include:
           - image: backend
@@ -230,6 +204,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
+      # cache-to: type=gha warms the GHA cache as a *fallback* (e.g. a
+      # Dependabot run that only touches one job's dependency file still
+      # lets other jobs' from-scratch builds hit cache for unrelated
+      # layers). The image itself is built here once, saved, and handed to
+      # every other job as an artifact below -- image-quality, e2e-smoke,
+      # and k8s-smoke all `docker load` + `docker tag` that artifact
+      # instead of each independently re-invoking buildx and re-pulling the
+      # cache, which used to happen 4 times total for identical,
+      # already-built image content.
       - uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
@@ -238,6 +221,44 @@ jobs:
           load: true
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+      - name: Save the image for reuse by other jobs
+        run: docker save magewiki-${{ matrix.image }}-ci -o /tmp/magewiki-${{ matrix.image }}-ci.tar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ matrix.image }}
+          path: /tmp/magewiki-${{ matrix.image }}-ci.tar
+          retention-days: 1
+
+  # image-scan/image-structure-test/sbom used to be 3 separate matrix jobs
+  # (9 job runs total), each independently re-pulling the GHA cache and
+  # rebuilding the same image from scratch just to run one check against it.
+  # Merged into one job per image: the image is loaded once, then Trivy,
+  # container-structure-test, and the SBOM generator each run against that
+  # same already-loaded image -- same checks, a third of the runner
+  # startup/cache-restore overhead.
+  image-quality:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: backend
+            dockerfile: ./backend/Dockerfile
+          - image: frontend
+            dockerfile: ./frontend/Dockerfile
+          - image: php-analyzer
+            dockerfile: php-analyzer/Dockerfile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ matrix.image }}
+          path: /tmp
+      - run: docker load -i /tmp/magewiki-${{ matrix.image }}-ci.tar
       # pip-audit/npm audit (in the backend/frontend jobs above) only scan the
       # project's own lockfiles — this catches CVEs in the OS-layer packages the
       # base image (e.g. python:3.13-slim) brings in, which nothing else here does.
@@ -259,33 +280,6 @@ jobs:
         with:
           sarif_file: trivy-${{ matrix.image }}.sarif
           category: "trivy-${{ matrix.image }}"
-
-  image-structure-test:
-    needs: docker-build
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: backend
-            context: ./backend
-            dockerfile: ./backend/Dockerfile
-          - image: frontend
-            context: ./frontend
-            dockerfile: ./frontend/Dockerfile
-          - image: php-analyzer
-            context: .
-            dockerfile: php-analyzer/Dockerfile
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          tags: magewiki-${{ matrix.image }}-ci
-          load: true
-          cache-from: type=gha,scope=${{ matrix.image }}
       - name: Install container-structure-test
         run: |
           curl -fLO https://github.com/GoogleContainerTools/container-structure-test/releases/download/v1.22.1/container-structure-test-linux-amd64
@@ -293,43 +287,16 @@ jobs:
           sudo mv container-structure-test-linux-amd64 /usr/local/bin/container-structure-test
       - name: container-structure-test (${{ matrix.image }})
         run: container-structure-test test --image magewiki-${{ matrix.image }}-ci --config "$(dirname ${{ matrix.dockerfile }})/container-structure-test.yaml"
-
-  sbom:
-    # SBOM only, no cosign image signing: nothing in this project ever pushes
-    # these images to a registry (no GHCR/Docker Hub publish step exists at
-    # all -- docker-build/image-scan/image-structure-test/e2e-smoke/k8s-smoke
-    # all build and use them locally, within the same job, then discard
-    # them). Signing an image that's never distributed verifies nothing for
-    # anyone -- there's no pull site for a consumer to check the signature
-    # against. A CycloneDX SBOM has real value even for a locally-built,
-    # never-published image: it's a per-build, auditable record of exactly
-    # what's inside each image (OS packages + language deps), independent of
-    # Trivy's own point-in-time CVE scan above.
-    needs: docker-build
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: backend
-            context: ./backend
-            dockerfile: ./backend/Dockerfile
-          - image: frontend
-            context: ./frontend
-            dockerfile: ./frontend/Dockerfile
-          - image: php-analyzer
-            context: .
-            dockerfile: php-analyzer/Dockerfile
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          tags: magewiki-${{ matrix.image }}-ci
-          load: true
-          cache-from: type=gha,scope=${{ matrix.image }}
+      # SBOM only, no cosign image signing: nothing in this project ever pushes
+      # these images to a registry (no GHCR/Docker Hub publish step exists at
+      # all -- every job that uses these images, including this one, only
+      # loads and discards them locally). Signing an image that's never
+      # distributed verifies nothing for anyone -- there's no pull site for
+      # a consumer to check the signature against. A CycloneDX SBOM has real
+      # value even for a locally-built, never-published image: it's a
+      # per-build, auditable record of exactly what's inside each image (OS
+      # packages + language deps), independent of Trivy's own point-in-time
+      # CVE scan above.
       - name: Generate SBOM (${{ matrix.image }})
         uses: anchore/sbom-action@v0.24.0
         with:
@@ -359,7 +326,29 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - working-directory: frontend
         run: npm install
+      # Cache the downloaded Chromium binary across runs, keyed on the
+      # installed @playwright/test version -- e2e-smoke is the longest
+      # single job on the critical path (everything downstream of
+      # docker-build waits on it), and re-downloading the same browser
+      # binary from scratch every run was a real chunk of that. On a cache
+      # hit the browser binary itself is already in place, but --with-deps'
+      # apt-installed system libraries (fonts, libnss3, ...) aren't part of
+      # that cache dir, so those still need installing every run --
+      # install-deps alone is fast (no large download).
+      - name: Get installed Playwright version
+        id: playwright-version
+        working-directory: frontend
+        run: echo "version=$(node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
       - working-directory: frontend
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+      - working-directory: frontend
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
       - run: cp .env.example .env
       # A real scan root, not left empty like .env.example's default --
@@ -376,35 +365,31 @@ jobs:
       # and the whole fleet-wide conflict family, none of which demo-store's
       # single module can ever trigger. See frontend/tests/e2e/global-setup.ts.
       - run: echo "MAGEWIKI_SCAN_ROOT_2=$(pwd)/backend/tests/fixtures/conflict-store" >> .env
-      - uses: docker/setup-buildx-action@v3
-      # Pre-build and tag the three images docker-compose.yml's services
-      # expect (api/worker/migrate share one backend build, same dedup
-      # docker compose build itself would do), reading the same GHA cache
-      # scopes the docker-build job (this job's own `needs:`) just warmed --
-      # then `docker compose up -d` below with no --build reuses these
-      # already-tagged local images instead of rebuilding from scratch a
-      # third time. Tags match docker compose config --images' own
-      # auto-generated names (<project>-<service>, project name "magewiki"
-      # from this repo's directory name).
-      - uses: docker/build-push-action@v6
+      # Load the 3 images docker-build already built once (this job's own
+      # `needs:`) and tag them to match docker-compose.yml's own
+      # auto-generated service image names (<project>-<service>, project
+      # name "magewiki" from this repo's directory name) -- api/worker/
+      # migrate share one backend build, same dedup `docker compose build`
+      # itself would do. `docker compose up -d` below with no --build then
+      # reuses these already-tagged local images instead of rebuilding.
+      # docker-build is now a matrix (one artifact per image, name
+      # docker-image-<image>) -- merge-multiple: true pulls all 3 straight
+      # into one directory with no per-artifact subfolders, since each
+      # artifact already holds one uniquely-named tar.
+      - uses: actions/download-artifact@v4
         with:
-          context: ./backend
-          tags: magewiki-api,magewiki-worker,magewiki-migrate
-          load: true
-          cache-from: type=gha,scope=backend
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          tags: magewiki-web
-          load: true
-          cache-from: type=gha,scope=frontend
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: php-analyzer/Dockerfile
-          tags: magewiki-php-analyzer
-          load: true
-          cache-from: type=gha,scope=php-analyzer
+          pattern: docker-image-*
+          path: /tmp
+          merge-multiple: true
+      - run: |
+          docker load -i /tmp/magewiki-backend-ci.tar
+          docker load -i /tmp/magewiki-frontend-ci.tar
+          docker load -i /tmp/magewiki-php-analyzer-ci.tar
+          docker tag magewiki-backend-ci magewiki-api
+          docker tag magewiki-backend-ci magewiki-worker
+          docker tag magewiki-backend-ci magewiki-migrate
+          docker tag magewiki-frontend-ci magewiki-web
+          docker tag magewiki-php-analyzer-ci magewiki-php-analyzer
       # frontend/next-env.d.ts isn't tracked by git (Next.js generates it on
       # first `next dev`/`next build`) and isn't one of the anonymous
       # node_modules/.next volumes Docker already seeds node-owned -- it's a
@@ -453,29 +438,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
-      # Same three images docker-build already warmed the GHA cache for
-      # (scope names match), tagged :dev to match what k8s/base's manifests
-      # reference -- see k8s/base/{api,worker,web,php-analyzer,migrate-job}.yaml.
-      - uses: docker/build-push-action@v6
+      # Load the same three images docker-build already built once (this
+      # job's own `needs:`) and tag them :dev to match what k8s/base's
+      # manifests reference -- see
+      # k8s/base/{api,worker,web,php-analyzer,migrate-job}.yaml.
+      - uses: actions/download-artifact@v4
         with:
-          context: ./backend
-          tags: magewiki-backend:dev
-          load: true
-          cache-from: type=gha,scope=backend
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          tags: magewiki-frontend:dev
-          load: true
-          cache-from: type=gha,scope=frontend
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: php-analyzer/Dockerfile
-          tags: magewiki-php-analyzer:dev
-          load: true
-          cache-from: type=gha,scope=php-analyzer
+          pattern: docker-image-*
+          path: /tmp
+          merge-multiple: true
+      - run: |
+          docker load -i /tmp/magewiki-backend-ci.tar
+          docker load -i /tmp/magewiki-frontend-ci.tar
+          docker load -i /tmp/magewiki-php-analyzer-ci.tar
+          docker tag magewiki-backend-ci magewiki-backend:dev
+          docker tag magewiki-frontend-ci magewiki-frontend:dev
+          docker tag magewiki-php-analyzer-ci magewiki-php-analyzer:dev
       - uses: helm/kind-action@v1.14.0
         with:
           cluster_name: magewiki

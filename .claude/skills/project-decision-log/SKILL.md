@@ -3795,3 +3795,131 @@ license gate to `dependency-review.yml`:
   as a dependency without the consuming project inheriting its license,
   unlike GPL/AGPL, which would require this MIT project to relicense to keep
   shipping it.
+
+**Second CI follow-up, same session: OpenSSF Scorecard, link checking,
+actionlint, typos -- user's own picks after being asked.** Four small,
+independent additions, each verified for real (not just YAML syntax) before
+being wired in:
+
+- **`scorecard.yml`**: scores this repo's supply-chain posture against the
+  OpenSSF checklist, publishes it, feeds a new README badge. Deliberately
+  not triggered by `pull_request` -- GitHub doesn't grant pull_request runs
+  `id-token: write` (a security restriction for forked PRs, and also
+  Scorecard's own documented recommendation for a public repo), so it only
+  runs on push to `main` + a weekly schedule.
+- **`link-check.yml`** (lychee): catches a broken README/docs link before a
+  reader does, on doc changes and weekly (catches external link rot with no
+  doc change at all). `--exclude-loopback --exclude-private`: README has
+  several real `http://localhost:*` URLs in its local-dev prose that nothing
+  in a CI runner is listening on. The local Docker image used to dry-run
+  this before committing (`lycheeverse/lychee:latest`) turned out to have a
+  stale/expired CA cert bundle baked in and hung for minutes on the first
+  HTTPS link before failing -- confirmed it was the image, not this
+  machine's clock or network, via a plain `curl` in a *different* container
+  working fine against the same URL. Not chased further: the real
+  `lycheeverse/lychee-action` downloads a fresh native binary at CI runtime
+  rather than using that image, so the problem doesn't carry over. Verified
+  all 14 real external URLs across every tracked `.md` file resolve (200)
+  via plain `curl` instead.
+- **`actionlint.yml`**: the most obvious gap of the three -- actionlint was
+  used by hand, manually, before every single workflow change made
+  elsewhere in this session, but was never itself a CI check. Runs via the
+  official download-script pattern pinned to v1.7.12, only when
+  `.github/workflows/**` changes. Confirmed clean (exit 0) against every
+  existing workflow file too, consistent with how carefully those were
+  hand-checked already.
+- **`typos.yml`** (crate-ci/typos, v1.51.1): a real dry run against the
+  whole repo before wiring it in surfaced mostly noise, not real typos --
+  dozens of garbage "typos" came from
+  `backend/tests/fixtures/conflict-store/app/code/Vendor/PhpunitSample/vendor/bin/phpunit`,
+  a committed real vendor PHUnit tree (needed for the real-PHPUnit-execution
+  sandbox tests) whose minified-JS/binary content isn't authored prose.
+  Added `_typos.toml`: excludes that vendor tree plus lockfiles, and
+  allowlists a handful of real false positives (`mis-` as a hyphenated
+  prefix the tokenizer splits on; `unparseable`/`requeueing`/
+  `canonicalizations`, all attested spellings typos' dictionary lacks) and
+  two genuinely *intentional* typos used as test/demo data (`docs/
+  architecture.md`'s own fuzzy-search example, and a fuzzy-match eval
+  question in `dataset.py` already commented "deliberate typo"). Confirmed
+  clean (exit 0) after the config, not just "looks plausible."
+
+**CI runtime optimization (recorded 2026-11-22, same session): merged
+`image-scan`/`image-structure-test`/`sbom` into one `image-quality` job per
+image.** User's own call when asked, after the session's own additions
+tripled the redundancy this pattern already had: each of the 3 old jobs
+independently re-pulled the GHA cache and rebuilt the same image from
+scratch (unchanged, since nothing invalidated the cache between them) just
+to run one check against it -- 9 job runs total (3 images × 3 checks) with
+3× the runner-startup/checkout/buildx-setup/cache-restore overhead that
+achieves, instead of loading each image once and running Trivy +
+container-structure-test + the SBOM generator against that same load in
+one job. Not the bigger version of this idea (`docker save` the one image
+`docker-build` already built, instead of every consumer job rebuilding
+from GHA cache) -- that's still the existing, consciously accepted
+trade-off from the Nov-15 required-status-checks entry above, not revisited
+here. None of the three old job names were in `main`'s required-status-checks
+list, so this needed no branch-protection update.
+
+**CI optimization, round 2, same session: revisited the Nov-15 trade-off
+above and actually did it.** User's own call when asked a second time, after
+`dockerfile-lint` got the same merge treatment (3 matrix jobs -> 1 job
+looping over all 3 Dockerfiles; `if: always()` on the 2nd/3rd hadolint
+steps, or a backend/Dockerfile finding would silently skip checking
+frontend/php-analyzer in the same run -- the job's own conclusion is still
+failure if any step failed, same gating as the old matrix's `fail-fast:
+false` had). `docker-build` now `docker save`s its 3 already-built images
+and uploads them as one `actions/upload-artifact`; `image-quality`,
+`e2e-smoke`, and `k8s-smoke` each `docker load` + `docker tag` that
+artifact under whatever name each one needs
+(`magewiki-<image>-ci`/`magewiki-api`+`magewiki-worker`+`magewiki-migrate`+
+`magewiki-web`+`magewiki-php-analyzer`/`magewiki-<image>:dev` respectively)
+instead of each independently re-invoking buildx against the GHA cache --
+used to happen 4 times total (docker-build itself plus the 3 consumers) for
+identical, already-built image content. `cache-to: type=gha` is kept on
+`docker-build`'s own build step as a fallback for the next PR, not removed.
+Real trade-off, not a guaranteed win either direction: GHA's layer-based
+cache can sometimes beat a full-image artifact transfer for a large image
+depending on what changed, so this is worth watching in real CI run times
+after merge, not assumed correct from the YAML alone.
+
+**Measured, not assumed (same session, PR #53's real CI run):** a real win.
+`docker-build` itself got slower (2min -> 3m31s, now also running 3
+`docker save`s), but every consumer using the saved artifact got faster
+despite the extra download+load step: `e2e-smoke` 6m2s -> 5m50s, `k8s-smoke`
+4m25s -> 3m56s. The merged `image-quality` (3 jobs, 5m51s total) replaced
+9 separate jobs that totaled roughly 10 minutes (`image-scan` ~4m +
+`image-structure-test` ~2m44s + `sbom` ~3m39s). Across just these jobs,
+roughly 23.5 billed runner-minutes before, ~19.4 after -- about 17% less,
+on top of the clearer per-image job attribution the merge itself already
+bought. Also confirmed in this same run: a real bug in `link-check.yml`
+caught immediately -- `lychee-action`'s `args` input *replaces* its own
+documented default rather than merging with it, so shipping only the
+exclude flags with no file globs failed outright ("required arguments
+were not provided: `<inputs>`..."); fixed by restoring the default globs
+alongside the flags, confirmed green on the next run.
+
+**CI optimization, round 3: critical-path, not just total runner-minutes
+(user's own call when asked "can it be even better").** The round-2
+measurement above showed total cost dropped but didn't target the
+critical path (the longest dependency chain a PR actually waits on) --
+`docker-build` -> `e2e-smoke` specifically. Two changes:
+
+- **`docker-build` is now itself a matrix** (one job per image, unique
+  `docker-image-<image>` artifact each) instead of one job building all 3
+  sequentially. The 3 builds don't depend on each other, so this job's own
+  wall-clock drops to roughly the slowest single build instead of the sum
+  of all 3 -- and every downstream job (`image-quality`/`e2e-smoke`/
+  `k8s-smoke`) waits on this job finishing first, so that difference
+  propagates. `image-quality` now downloads just its own matching artifact;
+  `e2e-smoke`/`k8s-smoke` download all 3 via `download-artifact`'s
+  `pattern: docker-image-*` + `merge-multiple: true` (no per-artifact
+  subfolders, since each one already holds a uniquely-named tar) and tag
+  them as before.
+- **`e2e-smoke` now caches the downloaded Chromium binary** (`actions/
+  cache` on `~/.cache/ms-playwright`, keyed on the installed `@playwright/
+  test` version) -- it's the single longest job on the critical path, and
+  re-downloading the same browser binary from scratch every run was a real
+  chunk of that. `--with-deps`' apt-installed system libraries (fonts,
+  `libnss3`, ...) aren't part of that cache dir, so a cache hit still runs
+  `playwright install-deps chromium` (fast, no large download) rather than
+  skipping browser setup entirely.
